@@ -1,0 +1,12 @@
+{
+  "duckdb_version": "v1.5.4",
+  "platform": "linux_amd64",
+  "artifact": "https://github.com/duckdb/duckdb/releases/download/v1.5.4/libduckdb-linux-amd64.zip",
+  "zip_sha256": "838d98a85e697bab9935010c88a8c67d3312ccedcab4cb4a0ba01da65113bb70",
+  "libduckdb_so_sha256": "d7f30ef2ef4b813edb94ce82906329cc689672624a4161617ea33431040ce174",
+  "libduckdb_so_bytes": 70458712,
+  "duckdb_library_version_reported": "v1.5.4",
+  "accepted": true,
+  "checked_at": "2026-10-16",
+  "notes": "Official DuckDB shared library matching the Python wheel and the signed DuckPGQ f386a6c build in duckpgq-lock.json. Loaded by retrieval-native (DuckDB.NET.Bindings 1.5.3, engine supplied by this file) so the F# generation build runs the exact engine the gateway reads with. Local copy: ~/.local/state/speakez-retrieval/libduckdb-1.5.4/libduckdb.so; shipped in the release bundle as libduckdb.so."
+}

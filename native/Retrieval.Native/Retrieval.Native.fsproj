@@ -1,0 +1,76 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Native retrieval toolchain: relationship pass and DuckDB generation build.
+       Multi-core replacement for the former single-threaded Python pass: per-file
+       scanning runs in parallel; merge order is deterministic so output is
+       byte-identical across runs and core counts. Published as a self-contained
+       linux-x64 single file for VM71, which carries no .NET runtime. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <WarningLevel>3</WarningLevel>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <RuntimeIdentifier>linux-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <!-- Startup matters: the indexer invokes this per build. ReadyToRun precompiles the IL
+         and an uncompressed single file avoids inflating the runtime on every start. -->
+    <EnableCompressionInSingleFile>false</EnableCompressionInSingleFile>
+    <PublishReadyToRun>true</PublishReadyToRun>
+    <TieredCompilation>true</TieredCompilation>
+    <DebugType>none</DebugType>
+    <ServerGarbageCollector>false</ServerGarbageCollector>
+    <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
+    <TieredPGO>true</TieredPGO>
+    <Deterministic>true</Deterministic>
+    <AssemblyName>retrieval-native</AssemblyName>
+    <RootNamespace>Retrieval.Native</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Text.fs" />
+    <Compile Include="Snapshot.fs" />
+    <Compile Include="Canonical.fs" />
+    <Compile Include="Policy.fs" />
+    <Compile Include="Resolve.fs" />
+    <Compile Include="Glob.fs" />
+    <Compile Include="Git.fs" />
+    <Compile Include="Extract.fs" />
+    <Compile Include="Enrich.fs" />
+    <Compile Include="Load.fs" />
+    <Compile Include="Generation.fs" />
+    <Compile Include="IndexState.fs" />
+    <Compile Include="Coordinator.fs" />
+    <Compile Include="Query.fs" />
+    <Compile Include="Examples.fs" />
+    <Compile Include="Gbnf.fs" />
+    <Compile Include="English.fs" />
+    <Compile Include="Requests.fs" />
+    <Compile Include="Serve.fs" />
+    <Compile Include="Probe.fs" />
+    <Compile Include="Program.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Kestrel for the gateway; shipped inside the self-contained publish. -->
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The functional async host is ahead of the published preview.6 package.
+         Build from its primary checkout; the release receipt binds its commit. -->
+    <ProjectReference Include="../../../Fidelity.FSharp.Incremental/src/Fidelity.FSharp.Incremental.Hosting/Fidelity.FSharp.Incremental.Hosting.fsproj" />
+    <ProjectReference Include="../../../Ranvier/src/Ranvier/Ranvier.fsproj" />
+    <PackageReference Include="Oxpecker" Version="2.1.1" />
+    <PackageReference Include="Tomlyn" Version="0.19.0" />
+    <!-- Bindings only: the engine is the hash-pinned official libduckdb 1.5.4 shipped in the release bundle. -->
+    <PackageReference Include="DuckDB.NET.Data" Version="1.5.3" />
+    <!-- Durable coordinator state and the publication/freshness fence. -->
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.13" />
+  </ItemGroup>
+
+</Project>

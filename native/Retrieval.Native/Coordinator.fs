@@ -1,0 +1,304 @@
+/// The indexer: authoritative observation, mirrors, settle window, in-process
+/// extraction and generation, fenced publication. Replaces retrieval.pipeline.
+module Retrieval.Native.Coordinator
+
+open System
+open System.Collections.Concurrent
+open System.Collections.Generic
+open System.IO
+open System.Runtime.InteropServices
+open System.Security.Cryptography
+open System.Text
+open System.Text.Json
+open System.Text.RegularExpressions
+open System.Threading
+open System.Threading.Tasks
+open Retrieval.Native.Canonical
+open Retrieval.Native.IndexState
+
+exception PipelineStopped of string
+
+type Source =
+    { Id: string; Repo: string; Ref: string; DependsOn: string list; LayerRules: JsonElement option; Policy: JsonElement option
+      Normalized: Policy.Normalized; Raw: JsonElement }
+
+let private idPattern = Regex(@"\A[a-z][a-z0-9_\-]{0,47}\z", RegexOptions.Compiled)
+let private repoPattern = Regex(@"\AFidelityFramework/[A-Za-z0-9_.\-]{1,80}\z", RegexOptions.Compiled)
+let private refPattern = Regex(@"\Arefs/heads/[A-Za-z0-9][A-Za-z0-9_./\-]{0,100}\z", RegexOptions.Compiled)
+let private revisionPattern = Regex(@"\A[0-9a-f]{40}\z", RegexOptions.Compiled)
+
+/// config_sources: validated, ordered as configured.
+let configSources (configPath: string) : Source list * JsonElement =
+    let document = JsonDocument.Parse(File.ReadAllBytes configPath)
+    let root = document.RootElement
+    let keys = [ for p in root.EnumerateObject() -> p.Name ] |> set
+    if keys <> set [ "schema_version"; "sources" ] || root.GetProperty("schema_version").GetRawText() <> "1" then raise (ArgumentException "Unsupported corpus configuration")
+    let sources = root.GetProperty("sources")
+    if sources.ValueKind <> JsonValueKind.Array || sources.GetArrayLength() < 1 || sources.GetArrayLength() > 64 then raise (ArgumentException "Configure 1–64 explicit sources")
+    let seen = HashSet<string>()
+    let result =
+        [ for source in sources.EnumerateArray() do
+            let fields = [ for p in source.EnumerateObject() -> p.Name ] |> set
+            if not (Set.isSubset (set [ "id"; "repo"; "ref"; "depends_on" ]) fields) || not (Set.isSubset fields (set [ "id"; "repo"; "ref"; "depends_on"; "layer_rules"; "policy" ])) then raise (ArgumentException "Invalid source fields")
+            let id = source.GetProperty("id").GetString()
+            if isNull id || not (idPattern.IsMatch id) || not (seen.Add id) then raise (ArgumentException "Invalid or repeated source ID")
+            let repo = source.GetProperty("repo").GetString()
+            if isNull repo || not (repoPattern.IsMatch repo) then raise (ArgumentException "Only explicit FidelityFramework repositories are accepted")
+            let reference = source.GetProperty("ref").GetString()
+            if isNull reference || not (refPattern.IsMatch reference) || reference.Contains ".." || reference.EndsWith("/", StringComparison.Ordinal) then raise (ArgumentException "A canonical explicit branch ref is required")
+            let policy = match source.TryGetProperty("policy") with | true, p when p.ValueKind = JsonValueKind.Null -> raise (ArgumentException "Repository policy must be an object") | true, p -> Some p | _ -> None
+            let normalized = try Policy.normalize policy with Snapshot.RelationshipError m -> raise (ArgumentException m)
+            yield { Id = id; Repo = repo; Ref = reference; DependsOn = [ for d in source.GetProperty("depends_on").EnumerateArray() -> d.GetString() ]
+                    LayerRules = (match source.TryGetProperty("layer_rules") with | true, v -> Some v | _ -> None); Policy = policy; Normalized = normalized; Raw = source } ]
+    if (result |> List.map (fun s -> s.Repo.ToLowerInvariant()) |> List.distinct).Length <> result.Length then raise (ArgumentException "First slice supports one tracked ref per repository")
+    result, root
+
+let policyJ (p: Policy.Normalized) : J =
+    Obj [ "role", Str p.Role; "authority", Int p.Authority; "capabilities", Arr (p.Capabilities |> List.map Str)
+          "include_generated", Arr (p.IncludeGenerated |> List.map Str); "include_paths", Arr (p.IncludePaths |> List.map Str)
+          "exclude_paths", Arr (p.ExcludePaths |> List.map Str) ]
+
+let private defaultExtractLimits : Extract.Limits =
+    { MaxRepositories = 64; MaxTreeEntries = 100_000L; MaxTreeBytes = 16 * 1024 * 1024; MaxFiles = 20_000; MaxFileBytes = 1024 * 1024
+      MaxSourceBytes = 128L * 1024L * 1024L; MaxNodes = 100_000; MaxEdges = 200_000; MaxOutputBytes = 384L * 1024L * 1024L
+      MaxLayerRules = 64; MaxRulePatterns = 32; MaxTotalRulePatterns = 256; MaxLinksPerFile = 1024; MaxBuildSeconds = 600.0; GitTimeoutSeconds = 15.0 }
+
+/// canonical_config_identity: identical bytes to the Python coordinator (the gateway compares it).
+let configIdentity (sources: Source list) : string =
+    let normalized =
+        [ for source in sources |> List.sortWith (fun a b -> String.CompareOrdinal(a.Id, b.Id)) ->
+            let rules = Extract.layerRules source.LayerRules defaultExtractLimits |> List.filter (fun r -> r.Origin = "manifest")
+            Obj [ "id", Str source.Id; "repo", Str source.Repo; "ref", Str source.Ref
+                  "depends_on", Arr (source.DependsOn |> List.sortWith (fun a b -> String.CompareOrdinal(a, b)) |> List.map Str)
+                  "layer_rules", Arr [ for r in rules -> Obj [ "name", Str r.Name; "patterns", Arr (r.Patterns |> List.map Str) ] ]
+                  "policy", policyJ source.Normalized ] ]
+    fst (digest canonicalStyle (Obj [ "version", Int 2L; "sources", Arr normalized ]))
+
+/// Extraction fingerprint: the configured sources plus the toolchain binary and engine locks.
+let extractionFingerprint (sources: Source list) (lockFiles: string list) : string =
+    use hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256)
+    let configured = Obj [ for s in sources -> s.Id, Raw s.Raw ]
+    hash.AppendData(Encoding.UTF8.GetBytes(toText canonicalStyle configured))
+    hash.AppendData(File.ReadAllBytes(Environment.ProcessPath))
+    for file in lockFiles do hash.AppendData(File.ReadAllBytes file)
+    Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant()
+
+let private atomicJson (path: string) (value: J) =
+    let temporary = Path.Combine(Path.GetDirectoryName path, "." + Path.GetFileName path + "-" + Guid.NewGuid().ToString("N"))
+    (use stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None)
+     File.SetUnixFileMode(temporary, UnixFileMode.UserRead ||| UnixFileMode.UserWrite)
+     let bytes = Encoding.UTF8.GetBytes(toText canonicalStyle value + "\n")
+     stream.Write(bytes, 0, bytes.Length)
+     stream.Flush(true))
+    File.Move(temporary, path, true)
+
+type Options =
+    { Root: string; Config: string; Extensions: string; Engine: Load.Engine; Budgets: Generation.Budgets; ExtractLimits: Extract.Limits
+      RemoteBase: string; LeaseSeconds: float; SettleSeconds: float option; MaxSettleSeconds: float option; LockFiles: string list }
+
+type Coordinator(options: Options, stop: CancellationToken) =
+    let root = Path.GetFullPath options.Root
+    let sources, _ = configSources options.Config
+    let byId = sources |> List.map (fun s -> s.Id, s) |> Map.ofList
+    let identity = configIdentity sources
+    let fingerprint = extractionFingerprint sources options.LockFiles
+    do for directory in [ "mirrors"; "components"; "generations" ] do Directory.CreateDirectory(Path.Combine(root, directory)) |> ignore
+    let state =
+        State(Path.Combine(root, "index-state.sqlite"), [ for s in sources -> s.Id, s.DependsOn ], leaseSeconds = options.LeaseSeconds,
+              ?settleSeconds = options.SettleSeconds, ?maxSettleSeconds = options.MaxSettleSeconds)
+    do
+        let marker = Path.Combine(root, "extractor-fingerprint.json")
+        let previous = if File.Exists marker then Some(File.ReadAllText marker) else None
+        let expected = toText canonicalStyle (Obj [ "sha256", Str fingerprint ]) + "\n"
+        if previous <> Some expected then
+            state.InvalidateSources([ for s in sources -> s.Id ], "Extractor or corpus configuration changed") |> ignore
+            atomicJson marker (Obj [ "sha256", Str fingerprint ])
+    let observationLock = obj ()
+    let checkpoint () = if stop.IsCancellationRequested then raise (PipelineStopped "Indexer stopping; no further generation will be published")
+    let remoteUrl (source: Source) =
+        if options.RemoteBase.StartsWith("/", StringComparison.Ordinal) then Path.Combine(options.RemoteBase, source.Repo)
+        else options.RemoteBase.TrimEnd('/') + "/" + source.Repo + ".git"
+    let localRemote = options.RemoteBase.StartsWith("/", StringComparison.Ordinal)
+    let fileProtocol = if localRemote then [ "-c"; "protocol.file.allow=always" ] else []
+
+    member _.State = state
+    member _.Identity = identity
+    member _.Fingerprint = fingerprint
+    member _.Sources = sources
+
+    /// Authoritative head of the tracked ref, None when the ref is absent.
+    member _.RemoteHead(source: Source) : string option =
+        let output = Encoding.UTF8.GetString(Git.runNetwork null (fileProtocol @ [ "ls-remote"; "--refs"; remoteUrl source; source.Ref ]) 65536 20.0)
+        let lines = output.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+        if lines.Length = 0 then None
+        elif lines.Length <> 1 then raise (InvalidOperationException "Authoritative ref query was ambiguous")
+        else
+            let parts = lines.[0].Split('\t')
+            if parts.Length <> 2 || parts.[1] <> source.Ref || not (revisionPattern.IsMatch parts.[0]) then raise (InvalidOperationException "Unexpected authoritative Git ref")
+            Some parts.[0]
+
+    /// Observe every source concurrently; an outage is a reconcile hint, never a deletion.
+    member this.Observe() : J list =
+        checkpoint ()
+        lock observationLock (fun () ->
+            checkpoint ()
+            let errors = ConcurrentBag<J>()
+            Parallel.ForEach(sources, ParallelOptions(MaxDegreeOfParallelism = 6), fun (source: Source) ->
+                if not stop.IsCancellationRequested then
+                    let started = state.Now()
+                    try
+                        let revision = this.RemoteHead source
+                        state.ObserveHeads([ source.Id, revision ], started) |> ignore
+                    with
+                    | PipelineStopped _ -> ()
+                    | error ->
+                        errors.Add(Obj [ "source_id", Str source.Id; "error_type", Str (error.GetType().Name) ])
+                        state.EventHint("observation-failed:" + source.Id + ":" + Guid.NewGuid().ToString("N"), source.Id, "reconcile") |> ignore) |> ignore
+            checkpoint ()
+            let list = List.ofSeq errors
+            atomicJson (Path.Combine(root, "last-observation.json")) (Obj [ "time", Float (state.Now()); "errors", Arr list ])
+            list)
+
+    member _.Fetch(source: Source, revision: string) : string =
+        let mirror = Path.Combine(root, "mirrors", source.Id + ".git")
+        if not (Directory.Exists mirror) then Git.runNetwork null [ "init"; "--bare"; mirror ] 65536 90.0 |> ignore
+        Git.runNetwork mirror (fileProtocol @ [ "fetch"; "--no-tags"; "--depth=1"; remoteUrl source; revision ]) 65536 180.0 |> ignore
+        mirror
+
+    member _.ComponentPath(sourceId: string, revision: string) =
+        let key = fst (digest canonicalStyle (Arr [ Str sourceId; Str revision; Str fingerprint ]))
+        Path.Combine(root, "components", key + ".json")
+
+    /// Fetch changed mirrors concurrently, then extract each component in-process.
+    member this.Extract(targets: (Source * string * string) list) =
+        if not targets.IsEmpty then
+            let mirrors = ConcurrentDictionary<string, string>()
+            Parallel.ForEach(targets, ParallelOptions(MaxDegreeOfParallelism = 4), fun (source: Source, revision: string, _) ->
+                mirrors.[source.Id] <- this.Fetch(source, revision)) |> ignore
+            checkpoint ()
+            Parallel.ForEach(targets, fun (source: Source, revision: string, path: string) ->
+                let fields : (string * J) list =
+                    [ ("path", Str mirrors.[source.Id]); ("name", Str source.Repo); ("commit", Str revision); ("ref", Str source.Ref)
+                      ("source_url", Str ("https://forge.spkez.dev/" + source.Repo)) ]
+                    @ (match source.LayerRules with Some r -> [ ("layer_rules", Raw r) ] | None -> [])
+                    @ (match source.Policy with Some p -> [ ("policy", Raw p) ] | None -> [])
+                let manifest = Obj [ ("repositories", Arr [ Obj fields ]) ]
+                use document = JsonDocument.Parse(toText canonicalStyle manifest)
+                let _, content = Extract.build document.RootElement options.ExtractLimits
+                Extract.writeAtomic path content) |> ignore
+            checkpoint ()
+
+    /// Open the staged generation and exercise sources and a PGQ hop once.
+    member _.Verify(database: string, snapshotId: string) =
+        use connection = Load.openEngine options.Engine database
+        let scalar (sql: string) = (use c = connection.CreateCommand() in c.CommandText <- sql; c.ExecuteScalar())
+        let metadata = string (scalar "SELECT value FROM metadata")
+        (use d = JsonDocument.Parse(metadata) in if d.RootElement.GetProperty("snapshot_id").GetString() <> snapshotId then raise (InvalidOperationException "Staged generation identity differs"))
+        match scalar "SELECT id FROM nodes WHERE kind='file' ORDER BY id LIMIT 1" with
+        | :? string as seed ->
+            scalar (sprintf "SELECT length(text) FROM nodes WHERE id='%s'" seed) |> ignore
+            use c = connection.CreateCommand()
+            c.CommandText <- sprintf "FROM GRAPH_TABLE(corpus MATCH (a:resource WHERE a.id = '%s')-[e:relation]->(b:resource) COLUMNS (b.id AS id, b.path AS path, b.kind AS kind, e.kind AS edge_kind)) ORDER BY ALL LIMIT 2" seed
+            use reader = c.ExecuteReader()
+            while reader.Read() do ()
+        | _ -> ()
+
+    /// One build pass; `force` skips the settle window (operator --once builds).
+    member this.RunOnce(force: bool) : J =
+        checkpoint ()
+        let plan = state.PendingPlan()
+        if not plan.ObservationRequired.IsEmpty then Obj [ "status", Str "observation_required" ]
+        elif plan.Targets.IsEmpty then Obj [ "status", Str "idle" ]
+        else
+        let remaining = match plan.SettleUntil with Some until when not force && plan.BaseGeneration.IsSome -> until - state.Now() | _ -> 0.0
+        if remaining > 0.0 then
+            Obj [ "status", Str "settling"; "settle_seconds_remaining", Float (Math.Round(remaining, 3)); "pending_sources", Arr [ for s in plan.Targets.Keys -> Str s ] ]
+        else
+        let token = state.StartBuild plan
+        let reused, rebuilt = ResizeArray<string>(), ResizeArray<string>()
+        let temporary = Path.Combine(root, "generations", token + ".building.duckdb")
+        try
+            try
+                let components = ResizeArray<Generation.ComponentSpec>()
+                let pending = ResizeArray<Source * string * string>()
+                for kv in plan.DesiredRevisions do
+                    checkpoint ()
+                    match kv.Value with
+                    | None -> ()
+                    | Some revision ->
+                        let source = byId.[kv.Key]
+                        let path = this.ComponentPath(kv.Key, revision)
+                        if File.Exists path && not (plan.Targets.ContainsKey kv.Key) then reused.Add kv.Key
+                        else
+                            pending.Add((source, revision, path))
+                            rebuilt.Add kv.Key
+                        components.Add { Path = path; SourceId = kv.Key; Repo = source.Repo; Commit = revision }
+                this.Extract(List.ofSeq pending)
+                state.RenewBuild token |> ignore
+                let trackedEntry (sourceId: string) (revision: string option) : J =
+                    Obj [ ("repo", Str byId.[sourceId].Repo); ("ref", Str byId.[sourceId].Ref); ("revision", (match revision with Some r -> Str r | None -> Null)) ]
+                let tracked = Obj [ for kv in plan.DesiredRevisions -> (kv.Key, trackedEntry kv.Key kv.Value) ]
+                let report = Generation.generation options.Engine options.Budgets (List.ofSeq components) identity tracked temporary
+                checkpoint ()
+                let target = Path.Combine(root, "generations", report.SnapshotId + ".duckdb")
+                if not (File.Exists target) then
+                    this.Verify(temporary, report.SnapshotId)
+                    checkpoint ()
+                    (use handle = File.Open(temporary, FileMode.Open, FileAccess.Read) in handle.Flush(true))
+                    File.Move(temporary, target)
+                if not (this.Observe()).IsEmpty then raise (InvalidOperationException "Authoritative recheck failed; staged generation remains unpublished")
+                checkpoint ()
+                let result = state.CompleteBuild(token, report.SnapshotId, [ for kv in plan.Targets -> kv.Key, kv.Value ])
+                let phases = Obj [ for (name, seconds) in report.Phases -> name, Float (Math.Round(seconds, 3)) ]
+                let result = match result with Obj pairs -> Obj (pairs @ [ "rebuilt", Arr [ for s in rebuilt -> Str s ]; "reused", Arr [ for s in reused -> Str s ]; "phases", phases ]) | other -> other
+                atomicJson (Path.Combine(root, "last-build.json")) result
+                result
+            finally
+                if File.Exists temporary then File.Delete temporary
+                if File.Exists(temporary + ".wal") then File.Delete(temporary + ".wal")
+        with error ->
+            let cancelled = (match error with PipelineStopped _ -> true | _ -> false)
+            let kind = if cancelled then "cancelled" else error.GetType().Name
+            (try state.FailBuild(token, kind) |> ignore with _ -> ())
+            atomicJson (Path.Combine(root, "last-build.json")) (Obj [ "status", Str (if cancelled then "cancelled" else "failed"); "error_type", Str (error.GetType().Name); "rebuilt", Arr [ for s in rebuilt -> Str s ] ])
+            reraise ()
+
+/// The indexer process: lock the root, observe, then build on hints and the 30-second sweep.
+let serve (options: Options) (once: bool) : int =
+    let root = Path.GetFullPath options.Root
+    Directory.CreateDirectory root |> ignore
+    use lockFile = new FileStream(Path.Combine(root, "indexer.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None)
+    use stop = new CancellationTokenSource()
+    use _term = PosixSignalRegistration.Create(PosixSignal.SIGTERM, fun context -> context.Cancel <- true; stop.Cancel())
+    use _int = PosixSignalRegistration.Create(PosixSignal.SIGINT, fun context -> context.Cancel <- true; stop.Cancel())
+    let coordinator = Coordinator(options, stop.Token)
+    let print (value: J) = Console.Out.WriteLine(toText canonicalStyle value); Console.Out.Flush()
+    try
+        coordinator.Observe() |> ignore
+        if once then
+            print (coordinator.RunOnce true)
+            0
+        else
+            let reconcile =
+                Task.Run(fun () ->
+                    while not (stop.Token.WaitHandle.WaitOne(30000)) do
+                        try coordinator.Observe() |> ignore
+                        with
+                        | PipelineStopped _ -> ()
+                        | error -> print (Obj [ "observation_error", Str (error.GetType().Name) ]))
+            while not stop.IsCancellationRequested do
+                let status =
+                    try
+                        let result = coordinator.RunOnce false
+                        let status = match result with Obj pairs -> (pairs |> List.tryPick (fun (k, v) -> if k = "status" then (match v with Str s -> Some s | _ -> None) else None)) | _ -> None
+                        if status = Some "observation_required" then coordinator.Observe() |> ignore
+                        status
+                    with
+                    | PipelineStopped _ -> None
+                    | error -> print (Obj [ "index_error", Str (error.GetType().Name) ]); None
+                let delay = if status = Some "observation_required" || status = Some "settling" then 1000 else 5000
+                stop.Token.WaitHandle.WaitOne(delay) |> ignore
+            reconcile.Wait(10000) |> ignore
+            0
+    with
+    | PipelineStopped _ -> 0

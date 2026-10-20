@@ -1,0 +1,11 @@
+{
+  "duckdb_version": "1.5.4",
+  "platform": "linux_amd64",
+  "extension_version": "f386a6c",
+  "sha256": "327cd944fee87b6a7595dd5f186016396129a788c9613b23dd26176561364000",
+  "accepted": true,
+  "repository": "https://community-extensions.duckdb.org",
+  "checked_at": "2026-09-23",
+  "review_after": "2026-10-23",
+  "notes": "Official PyPI DuckDB1.5.4 with signed community DuckPGQf386a6c passes actual graph/persistence/security tests. Newest stable1.5.5 has no published package and direct source builds hit parser incompatibilities. Choose the tested maintained1.5pair over an alpha runtime or custom parser port; review on new published compatible artifacts. Incoming quantified shortest paths are unsupported. No1.4deployment."
+}

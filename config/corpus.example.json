@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "sources": [
+    {"id":"clef", "repo":"FidelityFramework/clef", "ref":"refs/heads/main", "depends_on":[]},
+    {"id":"composer", "repo":"FidelityFramework/Composer", "ref":"refs/heads/main", "depends_on":[]},
+    {"id":"spec", "repo":"FidelityFramework/clef-lang-spec", "ref":"refs/heads/main", "depends_on":[]},
+    {"id":"site", "repo":"FidelityFramework/clef-lang-site", "ref":"refs/heads/main", "depends_on":["spec"]}
+  ]
+}

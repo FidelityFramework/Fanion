@@ -1,0 +1,14 @@
+.scratch/
+**/bin/
+**/obj/
+**/publish/
+__pycache__/
+*.pyc
+*.duckdb
+*.duckdb.wal
+*.sqlite
+*.sqlite-*
+*.token
+*.secret
+.env
+.env.*
