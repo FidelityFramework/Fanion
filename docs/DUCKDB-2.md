@@ -119,6 +119,10 @@ checks. Measurements ran on Z13 against 23 pinned local repository components.
 | 4 | 233 | 344 | 2.8 |
 | 8 | 252 | 363 | 3.5 |
 
+One eight-appender trial reported a different phase split: 538 ms loading and
+13 ms graph construction. It remains in the receipt and in the three-trial
+medians above; the cause of that variation has not been isolated.
+
 Outgoing, incoming and chunk queries matched edge-table oracles, including after
 reopening. Four appenders helped loading; eight gave no consistent further gain.
 This establishes the tested workload, not a general 2.0 speed claim. The unchanged extractor separately

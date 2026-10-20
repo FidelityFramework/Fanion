@@ -1,6 +1,6 @@
 {
   "date": "2026-10-20",
-  "scope": "Pinned source and target-runtime validation; measurement scopes remain distinct. Indexing fixtures use 23 local repositories; live deployment must validate all 24 configured repositories.",
+  "scope": "Pinned source and target-runtime validation; measurement scopes remain distinct. Indexing fixtures use 23 local repositories. The deployment and live_acceptance entries record complete 24-repository acceptance at their stated snapshot.",
   "artifact": {
     "library_lock": {
       "duckdb_version": "v2.0.0-dev1",
