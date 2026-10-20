@@ -1,5 +1,8 @@
 # fanion
 
+> cloth worn on priest's arm and used for handling holy vessels
+> small flag used in surveying
+
 Ask a short question about a changing codebase. Get bounded graph results and
 the source passages that support them, tied to exact commits and line spans.
 
