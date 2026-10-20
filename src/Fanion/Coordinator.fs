@@ -13,6 +13,8 @@ open Fidelity.Data.JSON
 open System.Text.RegularExpressions
 open System.Threading
 open System.Threading.Tasks
+open Fidelity.FSharp.Incremental
+open Fidelity.FSharp.Incremental.Hosting
 open Fanion.Canonical
 open Fanion.IndexState
 
@@ -163,12 +165,13 @@ type Coordinator(options: Options, stop: CancellationToken) =
             Some parts.[0]
 
     /// Observe every source concurrently; an outage is a reconcile hint, never a deletion.
-    member this.Observe() : J list =
+    member this.Observe(?sourceIds: string list) : J list =
         checkpoint ()
         lock observationLock (fun () ->
             checkpoint ()
             let errors = ConcurrentBag<J>()
-            Parallel.ForEach(sources, ParallelOptions(MaxDegreeOfParallelism = 6), fun (source: Source) ->
+            let observed = match sourceIds with None -> sources | Some ids -> ids |> List.map (fun id -> byId.[id])
+            Parallel.ForEach(observed, ParallelOptions(MaxDegreeOfParallelism = 6), fun (source: Source) ->
                 if not stop.IsCancellationRequested then
                     let started = state.Now()
                     try
@@ -196,11 +199,14 @@ type Coordinator(options: Options, stop: CancellationToken) =
 
     /// Fetch changed mirrors concurrently, then extract each component in-process.
     member this.Extract(targets: (Source * string * string) list) =
+        let clock = Diagnostics.Stopwatch.StartNew()
+        let mutable fetched = 0.0
         if not targets.IsEmpty then
             let mirrors = ConcurrentDictionary<string, string>()
             Parallel.ForEach(targets, ParallelOptions(MaxDegreeOfParallelism = 4), fun (source: Source, revision: string, _) ->
                 mirrors.[source.Id] <- this.Fetch(source, revision)) |> ignore
             checkpoint ()
+            fetched <- clock.Elapsed.TotalSeconds
             Parallel.ForEach(targets, fun (source: Source, revision: string, path: string) ->
                 let fields : (string * J) list =
                     [ ("path", Str mirrors.[source.Id]); ("name", Str source.Repo); ("commit", Str revision); ("ref", Str source.Ref)
@@ -212,6 +218,7 @@ type Coordinator(options: Options, stop: CancellationToken) =
                 let _, content = Extract.build manifest options.ExtractLimits
                 Extract.writeAtomic path content) |> ignore
             checkpoint ()
+        fetched, clock.Elapsed.TotalSeconds - fetched
 
     /// Open the staged generation and exercise sources and a PGQ hop once.
     member _.Verify(database: string, snapshotId: string) =
@@ -241,6 +248,14 @@ type Coordinator(options: Options, stop: CancellationToken) =
         if remaining > 0.0 then
             Obj [ "status", Str "settling"; "settle_seconds_remaining", Float (Math.Round(remaining, 3)); "pending_sources", Arr [ for s in plan.Targets.Keys -> Str s ] ]
         else
+        let startedAt = DateTimeOffset.UtcNow
+        let clock = Diagnostics.Stopwatch.StartNew()
+        let timeline = ResizeArray<string * float * float>()
+        let mutable boundary = 0.0
+        let mark name =
+            let now = clock.Elapsed.TotalSeconds
+            timeline.Add(name, boundary, now)
+            boundary <- now
         let token = state.StartBuild plan
         let reused, rebuilt = ResizeArray<string>(), ResizeArray<string>()
         let temporary = Path.Combine(root, "generations", token + ".building.duckdb")
@@ -263,12 +278,15 @@ type Coordinator(options: Options, stop: CancellationToken) =
                             pending.Add((source, revision, path))
                             rebuilt.Add kv.Key
                         components.Add { Path = path; SourceId = kv.Key; Repo = source.Repo; Commit = revision }
-                this.Extract(List.ofSeq pending)
+                mark "prepare"
+                let fetchSeconds, extractSeconds = this.Extract(List.ofSeq pending)
+                mark "fetch_and_extract"
                 state.RenewBuild token |> ignore
                 let trackedEntry (sourceId: string) (revision: string option) : J =
                     Obj [ ("repo", Str byId.[sourceId].Repo); ("ref", Str byId.[sourceId].Ref); ("revision", (match revision with Some r -> Str r | None -> Null)) ]
                 let tracked = Obj [ for kv in plan.DesiredRevisions -> (kv.Key, trackedEntry kv.Key kv.Value) ]
                 let report = Generation.generation options.Engine options.Budgets (List.ofSeq components) identity tracked temporary
+                mark "generation"
                 checkpoint ()
                 let target = Path.Combine(root, "generations", report.SnapshotId + ".duckdb")
                 let exists = File.Exists target
@@ -280,13 +298,36 @@ type Coordinator(options: Options, stop: CancellationToken) =
                     File.Move(temporary, target)
                 // The serving process owns the active database's RW lock. Its
                 // engine-bound identity was verified at publication and Store open.
-                if not alreadyActive then this.Verify(target, report.SnapshotId)
+                // A rename preserves the already-verified file. Only a retained
+                // non-active target needs another open; never verify new bytes twice.
+                if exists && not alreadyActive then this.Verify(target, report.SnapshotId)
                 persistDirectory (Path.GetDirectoryName target)
+                mark "verify_and_persist"
                 if not (this.Observe()).IsEmpty then raise (InvalidOperationException "Authoritative recheck failed; staged generation remains unpublished")
+                mark "observe_heads"
                 checkpoint ()
                 let result = state.CompleteBuild(token, report.SnapshotId, [ for kv in plan.Targets -> kv.Key, kv.Value ])
+                mark "publish"
                 let phases = Obj [ for (name, seconds) in report.Phases -> name, Float (Math.Round(seconds, 3)) ]
-                let result = match result with Obj pairs -> Obj (pairs @ [ "rebuilt", Arr [ for s in rebuilt -> Str s ]; "reused", Arr [ for s in reused -> Str s ]; "phases", phases ]) | other -> other
+                let generationTiming =
+                    Obj [ for name, seconds in report.Phases do
+                              if name = "relationships" then
+                                  yield name, Obj [ "seconds", Float seconds
+                                                    "phases", Obj [ for child, elapsed in report.Phases do
+                                                                        if child.StartsWith("relationship_", StringComparison.Ordinal) then
+                                                                            yield child.Substring(13), Float elapsed ] ]
+                              elif not (name.StartsWith("relationship_", StringComparison.Ordinal)) then
+                                  yield name, Float seconds ]
+                let stages =
+                    [ for name, start, finish in timeline ->
+                        Obj [ "name", Str name; "start_seconds", Float start; "end_seconds", Float finish; "seconds", Float (finish - start) ] ]
+                let timing =
+                    Obj [ "started_at", Str (startedAt.ToString("O"))
+                          "seconds", Float boundary
+                          "stages", Arr stages
+                          "nested", Obj [ "fetch_and_extract", Obj [ "fetch", Float fetchSeconds; "extract", Float extractSeconds ]
+                                          "generation", generationTiming ] ]
+                let result = match result with Obj pairs -> Obj (pairs @ [ "rebuilt", Arr [ for s in rebuilt -> Str s ]; "reused", Arr [ for s in reused -> Str s ]; "phases", phases; "timing", timing ]) | other -> other
                 atomicJson (Path.Combine(root, "last-build.json")) result
                 result
             finally
@@ -299,7 +340,103 @@ type Coordinator(options: Options, stop: CancellationToken) =
             atomicJson (Path.Combine(root, "last-build.json")) (Obj [ "status", Str (if cancelled then "cancelled" else "failed"); "error_type", Str (error.GetType().Name); "rebuilt", Arr [ for s in rebuilt -> Str s ] ])
             reraise ()
 
-/// The indexer process: lock the root, observe, then build on hints and the 30-second sweep.
+/// One Incremental work slot owns effects. Durable state notifications wake the
+/// pull loop; timers are deadlines for debounce and missed-hook reconciliation.
+let run (coordinator: Coordinator) (changes: Changes) (stop: CancellationToken) = task {
+    let require = function Ok value -> value | Error error -> invalidOp (sprintf "Indexer host: %A" error)
+    let actions = ConcurrentDictionary<ValueToken, unit -> J>()
+    let results = ConcurrentDictionary<ValueToken, Result<J, exn>>()
+    let evaluate invocation _ = async {
+        match invocation with
+        | StepInvocation.Start request ->
+            let token = match request.Reads with [{ Value = ReadValue.Input(_, _, value) }] -> value | _ -> invalidOp "One indexing input required"
+            results.[token] <- try Ok(actions.[token]()) with error -> Error error
+            return StepOutcome.Complete(Completion.Succeeded token)
+        | StepInvocation.Resume _ -> return invalidOp "Indexing has no external suspension response"
+    }
+    let host = AsyncMailbox.create { Epoch = EpochId 1UL; MaxConcurrency = 1; CommandCapacity = 16 } evaluate |> require
+    AsyncMailbox.start host |> require
+    let send action = task {
+        let operation = AsyncMailbox.admit action host |> require
+        let! result = ClrInterop.toTask CancellationToken.None (AsyncMailbox.observe operation)
+        require result |> ignore
+        AsyncMailbox.drainEvents host |> ignore
+        AsyncMailbox.drainDiagnostics host |> ignore
+    }
+    let mutable serial = 0UL
+    let execute action = task {
+        serial <- serial + 1UL
+        let token = ValueToken serial
+        actions.[token] <- action
+        do! send (Action.SetInputs [{ Input = InputId 1UL; Stamp = InputStamp serial; Value = token }])
+        if serial = 1UL then
+            do! send (Action.ReserveScope(ScopeId 1UL, RevisionId 1UL))
+            do! send (Action.ReplaceScope(ScopeId 1UL, RevisionId 1UL, [ScopeEntry.Define {
+                Work = WorkId 1UL; Stamp = DefinitionStamp 1UL
+                Reads = [{ Slot = ReadSlotId 1UL; Source = ReadSource.Input(InputId 1UL) }] }]))
+            do! send (Action.Demand(DemandId 1UL, WorkId 1UL))
+        let mutable completed = false
+        while not completed do
+            let _, changed = AsyncMailbox.watch host
+            match AsyncMailbox.tryResult (WorkId 1UL) host with
+            | Some result when AsyncMailbox.isEligible result host && results.ContainsKey token -> completed <- true
+            | _ -> do! ClrInterop.toTask stop changed
+        let result = results.[token]
+        actions.TryRemove token |> ignore
+        results.TryRemove token |> ignore
+        return match result with Ok value -> value | Error error -> raise error
+    }
+    let print value = Console.Out.WriteLine(toText canonicalStyle value); Console.Out.Flush()
+    let mutable reconcileAt = 0.0
+    let mutable failedPlan = None
+    try
+        try
+            while not stop.IsCancellationRequested do
+                // Subscribe before reading the only publication authority.
+                let changed = changes.Watch()
+                let state = coordinator.State
+                let now = state.Now()
+                let plan = state.PendingPlan()
+                let due = now >= reconcileAt
+                if due || (not plan.ObservationRequired.IsEmpty && failedPlan <> Some plan.PlanId) then
+                    let observe () =
+                        let errors = if due then coordinator.Observe() else coordinator.Observe(plan.ObservationRequired)
+                        Obj [ "errors", Arr errors ]
+                    let! result = execute observe
+                    reconcileAt <- if due then state.Now() + 30.0 else reconcileAt
+                    match result with
+                    | Obj ["errors", Arr []] -> failedPlan <- None
+                    | _ -> print result; failedPlan <- Some(state.PendingPlan().PlanId)
+                elif not plan.Targets.IsEmpty && failedPlan <> Some plan.PlanId
+                     && (plan.BaseGeneration.IsNone || plan.SettleUntil |> Option.forall (fun until -> until <= now)) then
+                    try
+                        let! result = execute (fun () -> coordinator.RunOnce false)
+                        print result
+                        failedPlan <- None
+                    with
+                    | PipelineStopped _ -> stop.ThrowIfCancellationRequested()
+                    | error ->
+                        print (Obj [ "index_error", Str (error.GetType().Name) ])
+                        failedPlan <- Some(state.PendingPlan().PlanId)
+                else
+                    let deadline =
+                        if not plan.Targets.IsEmpty && failedPlan <> Some plan.PlanId then
+                            min reconcileAt (defaultArg plan.SettleUntil reconcileAt)
+                        else reconcileAt
+                    use timer = CancellationTokenSource.CreateLinkedTokenSource stop
+                    let delay = Task.Delay(TimeSpan.FromSeconds(max 0.001 (deadline - state.Now())), timer.Token)
+                    let! wake = Task.WhenAny(changed :> Task, delay)
+                    timer.Cancel()
+                    // Surface watcher failure instead of silently reverting to polling.
+                    if Object.ReferenceEquals(wake, changed) then do! changed
+                    stop.ThrowIfCancellationRequested()
+        with :? OperationCanceledException when stop.IsCancellationRequested -> ()
+    finally
+        // Join the one physical worker before releasing the indexer lock.
+        ClrInterop.toTask CancellationToken.None (AsyncMailbox.close host) |> fun closing -> closing.GetAwaiter().GetResult() |> require |> ignore
+}
+
+/// Lock the root for the service lifetime; a push wakes the existing owner.
 let serve (options: Options) (once: bool) : int =
     let root = Path.GetFullPath options.Root
     Directory.CreateDirectory root |> ignore
@@ -310,31 +447,13 @@ let serve (options: Options) (once: bool) : int =
     let coordinator = Coordinator(options, stop.Token)
     let print (value: J) = Console.Out.WriteLine(toText canonicalStyle value); Console.Out.Flush()
     try
-        coordinator.Observe() |> ignore
         if once then
+            coordinator.Observe() |> ignore
             print (coordinator.RunOnce true)
             0
         else
-            let reconcile =
-                Task.Run(fun () ->
-                    while not (stop.Token.WaitHandle.WaitOne(30000)) do
-                        try coordinator.Observe() |> ignore
-                        with
-                        | PipelineStopped _ -> ()
-                        | error -> print (Obj [ "observation_error", Str (error.GetType().Name) ]))
-            while not stop.IsCancellationRequested do
-                let status =
-                    try
-                        let result = coordinator.RunOnce false
-                        let status = match result with Obj pairs -> (pairs |> List.tryPick (fun (k, v) -> if k = "status" then (match v with Str s -> Some s | _ -> None) else None)) | _ -> None
-                        if status = Some "observation_required" then coordinator.Observe() |> ignore
-                        status
-                    with
-                    | PipelineStopped _ -> None
-                    | error -> print (Obj [ "index_error", Str (error.GetType().Name) ]); None
-                let delay = if status = Some "observation_required" || status = Some "settling" then 1000 else 5000
-                stop.Token.WaitHandle.WaitOne(delay) |> ignore
-            reconcile.Wait(10000) |> ignore
+            use changes = new Changes(Path.Combine(root, "index-state.sqlite"))
+            run coordinator changes stop.Token |> fun running -> running.GetAwaiter().GetResult()
             0
     with
     | PipelineStopped _ -> 0

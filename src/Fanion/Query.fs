@@ -12,6 +12,7 @@ open System.Text
 open Fidelity.Data.JSON
 open System.Text.RegularExpressions
 open System.Threading
+open System.Threading.Tasks
 open DuckDB.NET.Data
 open Fanion.Canonical
 open Fanion.IndexState
@@ -312,34 +313,48 @@ type ManagedStore(root: string, config: string, engine: Load.Engine, promptFile:
         let identityOk = Json.prop "corpus_config_sha256" current.Metadata = Some(JsonValue.String identity)
         (generation.Revisions.Keys |> Set.ofSeq) = (sources |> List.map (fun s -> s.Id) |> Set.ofList) && tracked = Some(toText canonicalStyle expected) && identityOk
 
+    member private this.CallLocked(action: Store -> J, snapshotId: string option) : J =
+        let generation = match state.ActiveGeneration() with Some g -> g | None -> raise (IndexNotCurrent(Obj [ "fresh", Bool false; "reasons", Arr [ Str "no_published_generation" ] ]))
+        let snapshot = generation.SnapshotId
+        let freshness = state.Freshness(snapshot, maxAge)
+        let isFresh (f: J) = match field f "fresh" with Some(Bool b) -> b | _ -> false
+        if not (isFresh freshness) then raise (IndexNotCurrent freshness)
+        (match snapshotId with Some s when s <> snapshot -> raise (QueryError "Snapshot changed; discover the schema again") | _ -> ())
+        if snapshot <> loaded then
+            let replacement = Store(Path.Combine(root, "generations", snapshot + ".duckdb"), engine, promptFile)
+            if replacement.SnapshotId <> snapshot then (replacement.Close(); raise (GraphUnavailable "Published artifact identity mismatch"))
+            let previous = store
+            store <- Some replacement; loaded <- snapshot
+            previous |> Option.iter (fun p -> p.Close())
+        let current = store.Value
+        if not (this.ConfigurationMatches(generation, current)) then
+            raise (IndexNotCurrent(match freshness with Obj pairs -> Obj ((pairs |> List.filter (fun (k, _) -> k <> "fresh" && k <> "reasons")) @ [ "fresh", Bool false; "reasons", Arr [ Str "corpus_configuration_changed" ] ]) | other -> other))
+        let result = action current
+        let after = state.Freshness(snapshot, maxAge)
+        if not (isFresh after) then raise (IndexNotCurrent after)
+        match result with Obj pairs -> Obj (pairs @ [ "freshness", after ]) | other -> other
+
     member this.Call(action: Store -> J, ?snapshotId: string) : J =
         if not (gate.Wait(250)) then raise (QueryBudgetError "Graph is busy")
-        try
-            let generation = match state.ActiveGeneration() with Some g -> g | None -> raise (IndexNotCurrent(Obj [ "fresh", Bool false; "reasons", Arr [ Str "no_published_generation" ] ]))
-            let snapshot = generation.SnapshotId
-            let freshness = state.Freshness(snapshot, maxAge)
-            let isFresh (f: J) = match field f "fresh" with Some(Bool b) -> b | _ -> false
-            if not (isFresh freshness) then raise (IndexNotCurrent freshness)
-            (match snapshotId with Some s when s <> snapshot -> raise (QueryError "Snapshot changed; discover the schema again") | _ -> ())
-            if snapshot <> loaded then
-                let replacement = Store(Path.Combine(root, "generations", snapshot + ".duckdb"), engine, promptFile)
-                if replacement.SnapshotId <> snapshot then (replacement.Close(); raise (GraphUnavailable "Published artifact identity mismatch"))
-                let previous = store
-                store <- Some replacement; loaded <- snapshot
-                previous |> Option.iter (fun p -> p.Close())
-            let current = store.Value
-            if not (this.ConfigurationMatches(generation, current)) then
-                raise (IndexNotCurrent(match freshness with Obj pairs -> Obj ((pairs |> List.filter (fun (k, _) -> k <> "fresh" && k <> "reasons")) @ [ "fresh", Bool false; "reasons", Arr [ Str "corpus_configuration_changed" ] ]) | other -> other))
-            let result = action current
-            let after = state.Freshness(snapshot, maxAge)
-            if not (isFresh after) then raise (IndexNotCurrent after)
-            match result with Obj pairs -> Obj (pairs @ [ "freshness", after ]) | other -> other
-        finally
-            gate.Release() |> ignore
+        try this.CallLocked(action, snapshotId)
+        finally gate.Release() |> ignore
 
     member this.Readiness() : J =
         try (match this.Call(fun s -> s.Schema()) with Obj pairs -> (pairs |> List.pick (fun (k, v) -> if k = "freshness" then Some v else None)) | other -> other)
         with IndexNotCurrent freshness -> freshness
+
+    /// Contention is a semaphore wait, not an unpublished generation. Waiting on
+    /// SQLite changes for a busy graph would miss its eventual semaphore release.
+    member this.ReadinessAsync(cancellation: CancellationToken) : Task<J> = task {
+        do! gate.WaitAsync cancellation
+        try
+            try
+                match this.CallLocked((fun s -> s.Schema()), None) with
+                | Obj pairs -> return pairs |> List.pick (fun (k, v) -> if k = "freshness" then Some v else None)
+                | other -> return other
+            with IndexNotCurrent freshness -> return freshness
+        finally gate.Release() |> ignore
+    }
 
     member this.Schema() = this.Call(fun s -> s.Schema())
     member this.Find(query, snapshotId, repo, limit, layer) = this.Call((fun s -> s.Find(query, snapshotId, repo, limit, layer)), snapshotId)

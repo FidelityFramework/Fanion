@@ -20,7 +20,8 @@ type Question =
       IncludeContext: bool; IncludeQuery: bool; IncludeResults: bool }
 
 type Ctx =
-    { Readiness: unit -> J
+    { Readiness: CancellationToken -> Task<J>
+      WatchReadiness: unit -> Task<unit>
       Evaluate: Question -> string -> CancellationToken -> Task<J>
       Sources: Coordinator.Source list }
 
@@ -39,6 +40,8 @@ type Service(ctx: Ctx) =
     let outputs = ConcurrentDictionary<ValueToken, Result<J, exn>>()
     let mutable serial, epoch, allocated, consumers = 0UL, 0UL, 0, 0
     let mutable closing = false
+    let signal () = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+    let mutable epochReleased = signal ()
     let field value name = match value with Obj pairs -> pairs |> List.tryPick (fun (k, v) -> if k = name then Some v else None) | _ -> None
     let next () = serial <- serial + 1UL; serial
     let require = function Ok v -> v | Error e -> raise (InvalidOperationException(sprintf "Retrieval coordinator: %A" e))
@@ -79,9 +82,10 @@ type Service(ctx: Ctx) =
             | Some(Bool true), Some(Str "latest"), Some(Str snapshot), Some(Str current) when snapshot = current -> Some snapshot
             | _ -> None)
         observed, published)
-    let readiness () =
-        let current = try ctx.Readiness() with QueryBudgetError _ -> Obj [ "fresh", Bool false ]
-        lock projectionGate (fun () -> projection.Run(fun () -> observed.Value <- current; current, published.Value))
+    let readiness ct = task {
+        let! current = ctx.Readiness ct
+        return lock projectionGate (fun () -> projection.Run(fun () -> observed.Value <- current; current, published.Value))
+    }
     let manifest = projection.Run(fun () -> createMemo(fun _ ->
         Obj [ "repositories", Arr [ for source in ctx.Sources -> Obj [ "repo", Str source.Repo; "ref", Str source.Ref; "policy", Coordinator.policyJ source.Normalized ] ]
               "configuration_sha256", Str (Coordinator.configIdentity ctx.Sources)
@@ -123,13 +127,18 @@ type Service(ctx: Ctx) =
                 let mutable answer = None
                 while answer.IsNone do
                     ct.ThrowIfCancellationRequested()
-                    let _, snapshot = readiness ()
+                    // Subscribe before reading the durable publication fence: a
+                    // publication during that read must not leave this caller asleep.
+                    let changed = ctx.WatchReadiness()
+                    if changed.IsCompleted then do! changed.WaitAsync ct
+                    let! _, snapshot = readiness ct
                     match snapshot with
-                    | None -> do! Task.Delay(250, ct)
+                    | None -> do! changed.WaitAsync ct
                     | Some snapshot ->
                         match question.Snapshot with Some pinned when pinned <> snapshot -> raise (EnglishError("snapshot_changed", 409, true)) | _ -> ()
                         do! gate.WaitAsync ct
                         let mutable bound = None
+                        let mutable capacity = Task.FromResult(())
                         try
                             if closing then invalidOp "Retrieval is stopping"
                             if allocated >= 128 && consumers = 0 then
@@ -158,9 +167,10 @@ type Service(ctx: Ctx) =
                                 do! send h (Action.Demand(demand, WorkId job.Id))
                                 job.Consumers <- job.Consumers + 1; consumers <- consumers + 1
                                 bound <- Some(h, job, demand)
+                            else capacity <- epochReleased.Task
                         finally gate.Release() |> ignore
                         match bound with
-                        | None -> do! Task.Delay(250, ct)
+                        | None -> do! capacity.WaitAsync ct
                         | Some(h, job, demand) ->
                             // Async disposal releases this demand even when its observer
                             // is canceled. The host still owns physical attempt cleanup.
@@ -172,6 +182,10 @@ type Service(ctx: Ctx) =
                                         job.Consumers <- job.Consumers - 1; consumers <- consumers - 1
                                         let failed = match outputs.TryGetValue(ValueToken job.Id) with true, Error _ -> true | _ -> false
                                         if job.Consumers = 0 && (failed || (AsyncMailbox.tryResult (WorkId job.Id) h).IsNone) then jobs.Remove((question, snapshot)) |> ignore
+                                        if consumers = 0 then
+                                            let released = epochReleased
+                                            epochReleased <- signal ()
+                                            released.TrySetResult() |> ignore
                                     finally gate.Release() |> ignore
                                 }) }
                             let mutable result = None
@@ -180,7 +194,7 @@ type Service(ctx: Ctx) =
                                 match AsyncMailbox.tryResult (WorkId job.Id) h with
                                 | Some offered when AsyncMailbox.isEligible offered h -> result <- Some outputs.[ValueToken job.Id]
                                 | _ -> do! ClrInterop.toTask ct changed
-                            let after, published = readiness ()
+                            let! after, published = readiness ct
                             // Eligibility is necessary, but IndexState alone authorizes
                             // current publication. A raced update rebinds this same caller.
                             if published = Some snapshot then

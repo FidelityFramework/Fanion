@@ -101,10 +101,94 @@ let private report (r: Generation.Report) =
                       "threads", Int (int64 r.Threads); "stats", r.Stats; "phases", phases ]
     Console.Out.WriteLine(toText canonicalStyle value)
 
+/// Operator re-extraction of current heads, not a simulated code push.
+let private reindex (args: Args) =
+    let root = Path.GetFullPath(args.Required "--root")
+    let database = Path.Combine(root, "index-state.sqlite")
+    if not (File.Exists database) then raise (InvalidOperationException "Reindex requires an existing published index")
+    let sources, _ = Coordinator.configSources (args.Required "--config")
+    let configured = sources |> List.map (fun source -> source.Id) |> set
+    let requested =
+        match args.Required "--sources" with
+        | "all" -> sources |> List.map (fun source -> source.Id)
+        | csv -> csv.Split(',') |> Array.toList
+    if requested.IsEmpty || requested.Length <> (set requested).Count || requested |> List.exists (fun id -> not (configured.Contains id)) then
+        raise (ArgumentException "--sources must be all or a comma-separated list of distinct configured source IDs")
+    let timeout = args.Int("--timeout-seconds", 120)
+    if timeout <= 0 then raise (ArgumentException "--timeout-seconds must be positive")
+    use deadline = new Threading.CancellationTokenSource(TimeSpan.FromSeconds(float timeout))
+    use changes = new IndexState.Changes(database)
+    let receiptPath = Path.Combine(root, "last-build.json")
+    use receipts = new IndexState.Changes(receiptPath)
+    let state = IndexState.State(database, [ for source in sources -> source.Id, source.DependsOn ])
+    let changed, receiptChanged = changes.Watch(), receipts.Watch()
+    if changed.IsCompleted then changed.GetAwaiter().GetResult()
+    if receiptChanged.IsCompleted then receiptChanged.GetAwaiter().GetResult()
+    let field name = function Obj fields -> fields |> List.find (fun (key, _) -> key = name) |> snd | _ -> raise (InvalidOperationException "Invalid state response")
+    let fresh snapshot = field "fresh" (state.Freshness(snapshot, 90.0)) = Bool true
+    let baseline = state.ActiveGeneration() |> Option.defaultWith (fun () -> raise (InvalidOperationException "Reindex requires a published generation"))
+    let plan = state.PendingPlan()
+    if not plan.Targets.IsEmpty || not plan.ObservationRequired.IsEmpty || plan.DesiredRevisions <> baseline.Revisions || not (fresh baseline.SnapshotId) then
+        raise (InvalidOperationException "Reindex requires a fresh publication without pending work or observations")
+    let now () = float (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()) / 1000.0
+    let startedAt = now ()
+    let clock = Diagnostics.Stopwatch.StartNew()
+    let accepted = state.InvalidateSources(requested, "Operator timing: re-extract current published heads")
+    let acceptedAt, acceptanceSeconds = now (), clock.Elapsed.TotalSeconds
+    let epoch = match field "desired_epoch" accepted with Int value -> value | _ -> raise (InvalidOperationException "Missing accepted epoch")
+    if epoch <> plan.DesiredEpoch + 1L then raise (InvalidOperationException "Concurrent invalidation changed the timing trial")
+    let fence () =
+        let current = state.PendingPlan()
+        if current.DesiredEpoch <> epoch || current.DesiredRevisions <> baseline.Revisions || not current.ObservationRequired.IsEmpty then
+            raise (InvalidOperationException "Concurrent source activity changed the timing trial; reindex remains owned by the coordinator")
+    let rec awaitChange (watcher: IndexState.Changes) (signal: Task<unit>) read =
+        deadline.Token.ThrowIfCancellationRequested()
+        if signal.IsCompleted then signal.GetAwaiter().GetResult()
+        match read () with
+        | Some result -> result
+        | None ->
+            signal.WaitAsync(deadline.Token).GetAwaiter().GetResult()
+            awaitChange watcher (watcher.Watch()) read
+    let published =
+        awaitChange changes changed (fun () ->
+            fence ()
+            match state.ActiveGeneration() with
+            | Some current when current.Generation > baseline.Generation ->
+                if current.Generation <> baseline.Generation + 1L || current.Revisions <> baseline.Revisions then
+                    raise (InvalidOperationException "Publication does not belong to this isolated reindex trial")
+                if fresh current.SnapshotId then Some current else None
+            | _ -> None)
+    let publicationObservedSeconds = clock.Elapsed.TotalSeconds
+    let build =
+        awaitChange receipts receiptChanged (fun () ->
+            fence ()
+            if not (File.Exists receiptPath) then None else
+            let value = File.ReadAllBytes receiptPath |> JsonInput.parseBytes
+            match Json.prop "generation" value |> Option.bind Json.tryAsInt64 with
+            | Some generation when generation > published.Generation -> raise (InvalidOperationException "A later build replaced this trial's receipt")
+            | Some generation when generation = published.Generation ->
+                if value |> JsonInput.property "snapshot_id" |> JsonInput.string <> published.SnapshotId
+                   || value |> JsonInput.property "status" |> JsonInput.string <> "completed"
+                   || not (value |> JsonInput.property "published" |> JsonInput.boolean) then
+                    raise (InvalidOperationException "The completed build receipt does not match the publication")
+                Some value
+            | _ -> None)
+    let receiptDelay = clock.Elapsed.TotalSeconds - publicationObservedSeconds
+    Console.Out.WriteLine(toText canonicalStyle (Obj [
+        "kind", Str "operator_reindex_current_heads"; "requested_sources", Arr (List.map Str requested)
+        "base_generation", Int baseline.Generation; "generation", Int published.Generation; "snapshot_id", Str published.SnapshotId
+        "started_at", Float startedAt; "accepted_at", Float acceptedAt; "recorded_publication_at", Float published.PublishedAt
+        "acceptance_seconds", Float acceptanceSeconds
+        "accepted_to_recorded_publication_seconds", Float (published.PublishedAt - acceptedAt)
+        "accepted_to_publication_observed_seconds", Float (publicationObservedSeconds - acceptanceSeconds)
+        "total_seconds", Float publicationObservedSeconds
+        "receipt_delay_seconds", Float receiptDelay; "build", Raw build ]))
+
 [<EntryPoint>]
 let main argv =
     try
         if argv.Length = 0 then
+            eprintfn "       retrieval-native reindex --root DIR --config FILE --sources all|id,id [--timeout-seconds 120]"
             eprintfn "usage: retrieval-native serve --root DIR --config FILE --token-file FILE --prompt-file FILE [--webhook-secret-file FILE] [--host H --port P]\n       retrieval-native index --root DIR --config FILE [--once] [--remote-base URL] [--duckpgq-lock FILE --libduckdb-lock FILE]\n       retrieval-native fingerprint --config FILE [--duckpgq-lock FILE --libduckdb-lock FILE]\n       retrieval-native probe [--base-url http://127.0.0.1:8080] [--only resources|http|engine] [--config FILE --marker FILE --token-file FILE --duckpgq-lock FILE --libduckdb-lock FILE]\n       retrieval-native schema --root DIR --config FILE --prompt-file FILE [--duckpgq-lock FILE --libduckdb-lock FILE]\n       retrieval-native extract <manifest.json> <component.json> [limits]\n       retrieval-native extract-components <batch.json> [limits]\n       retrieval-native relationships <snapshot.json> <output.json> [budgets]\n       retrieval-native load <snapshot.json> <output.duckdb> [--libduckdb-lock FILE --duckpgq-lock FILE --libduckdb PATH] [budgets]\n       retrieval-native generation <manifest.json> <output.duckdb> (same engine options)"
             64
         else
@@ -112,6 +196,7 @@ let main argv =
             let args = Args(argv.[1..])
             let positional = args.Positional
             match argv.[0] with
+            | "reindex" when positional.Length = 0 -> reindex args; 0
             | "prime" when positional.Length = 0 ->
                 let settings = English.settingsFromEnvironment () |> Option.defaultWith (fun () -> raise (InvalidOperationException "Gateway model is not configured"))
                 if settings.ResponseFormat <> "magnitude_gbnf" || settings.EnableThinking <> Some false then
@@ -153,7 +238,7 @@ let main argv =
                 0
             | "fingerprint" when positional.Length = 0 ->
                 // The one extraction fingerprint formula: configured sources + this binary + the engine locks.
-                // The Python coordinator and the guest readiness probe call this instead of computing their own.
+                // The F# coordinator and the guest readiness probe call this instead of computing their own.
                 let lockPath name fallback = args.Text(name, Path.Combine(Path.GetDirectoryName(Environment.ProcessPath), fallback))
                 let locks = [ lockPath "--duckpgq-lock" "duckpgq-lock.json"; lockPath "--libduckdb-lock" "libduckdb-lock.json" ]
                 let sources, _ = Coordinator.configSources (args.Required "--config")

@@ -259,6 +259,7 @@ let private readyAt snapshot fresh = Obj [ "fresh", Bool fresh; "snapshot_id", S
 let private queuedQuestion text : Requests.Question =
     { Text = text; Snapshot = None; Limit = 8L; MaxChars = 2400L; IncludeContext = false; IncludeQuery = true; IncludeResults = true }
 let private completed<'T> () = System.Threading.Tasks.TaskCompletionSource<'T>(System.Threading.Tasks.TaskCreationOptions.RunContinuationsAsynchronously)
+let private unchanged = (completed<unit> ()).Task
 let private bounded (pending: System.Threading.Tasks.Task<'T>) = pending.WaitAsync(TimeSpan.FromSeconds 10.0)
 let private until condition = task {
     use deadline = new CancellationTokenSource(TimeSpan.FromSeconds 10.0)
@@ -275,7 +276,8 @@ let ``four callers share work and one cancellation cannot cancel peers or repeat
     let entered, release = completed<unit> (), completed<unit> ()
     let mutable calls = 0
     let ctx : Requests.Ctx =
-        { Sources = []; Readiness = fun () -> readyAt "one" true
+        { Sources = []; Readiness = fun _ -> System.Threading.Tasks.Task.FromResult(readyAt "one" true)
+          WatchReadiness = fun () -> unchanged
           Evaluate = fun _ snapshot ct -> task {
               Interlocked.Increment(&calls) |> ignore
               entered.TrySetResult() |> ignore
@@ -306,7 +308,8 @@ let ``distinct questions queue within one model slot`` () =
     let entered, release = completed<unit> (), completed<unit> ()
     let mutable calls, running, peak = 0, 0, 0
     let ctx : Requests.Ctx =
-        { Sources = []; Readiness = fun () -> readyAt "one" true
+        { Sources = []; Readiness = fun _ -> System.Threading.Tasks.Task.FromResult(readyAt "one" true)
+          WatchReadiness = fun () -> unchanged
           Evaluate = fun question _ ct -> task {
               let active = Interlocked.Increment(&running)
               peak <- max peak active
@@ -332,8 +335,15 @@ let ``distinct questions queue within one model slot`` () =
 let ``snapshot work waits before admission and an in-flight update rebinds without resubmission`` () =
     let entered, release = completed<unit> (), completed<unit> ()
     let mutable snapshot, fresh, calls = "one", false, 0
+    let mutable changed = completed<unit> ()
+    let publish current isFresh =
+        let previous = changed
+        changed <- completed<unit> ()
+        snapshot <- current; fresh <- isFresh
+        previous.SetResult()
     let ctx : Requests.Ctx =
-        { Sources = []; Readiness = fun () -> readyAt snapshot fresh
+        { Sources = []; Readiness = fun _ -> System.Threading.Tasks.Task.FromResult(readyAt snapshot fresh)
+          WatchReadiness = fun () -> changed.Task
           Evaluate = fun _ bound ct -> task {
               let call = Interlocked.Increment(&calls)
               if call = 1 then entered.SetResult(); do! release.Task.WaitAsync ct
@@ -342,16 +352,80 @@ let ``snapshot work waits before admission and an in-flight update rebinds witho
         let request = service.Ask(queuedQuestion "held through cross linking", CancellationToken.None)
         Assert.Equal(0, calls)
         Assert.Equal(0, (service.Snapshot()).RunningSteps)
-        fresh <- true
+        publish "one" true
         do! bounded entered.Task
-        fresh <- false
+        publish "one" false
         release.SetResult()
         do! until (fun () -> (service.Snapshot()).RunningSteps = 0)
         Assert.False(request.IsCompleted)
-        snapshot <- "two"; fresh <- true
+        publish "two" true
         let! answer = bounded request
         Assert.Equal(Str "two", answer)
         Assert.Equal(2, calls)
+    })
+
+[<Fact>]
+let ``publication wakes all waiting callers without canceling a shared watch`` () =
+    let changed, waiting = completed<unit> (), completed<unit> ()
+    let mutable fresh, reads, calls = false, 0, 0
+    let ctx : Requests.Ctx =
+        { Sources = []; WatchReadiness = fun () -> changed.Task
+          Readiness = fun _ ->
+              if Interlocked.Increment(&reads) = 4 then waiting.SetResult()
+              System.Threading.Tasks.Task.FromResult(readyAt "one" fresh)
+          Evaluate = fun _ _ _ ->
+              Interlocked.Increment(&calls) |> ignore
+              System.Threading.Tasks.Task.FromResult(Str "published") }
+    runQueue ctx (fun service -> task {
+        use canceled = new CancellationTokenSource()
+        let question = queuedQuestion "four waiting readers"
+        let abandoned = service.Ask(question, canceled.Token)
+        let peers = [ for _ in 1..3 -> service.Ask(question, CancellationToken.None) ]
+        do! bounded waiting.Task
+        Assert.Equal(0, calls)
+        canceled.Cancel()
+        let! _ = Assert.ThrowsAnyAsync<OperationCanceledException>(fun () -> abandoned :> System.Threading.Tasks.Task)
+        Assert.False(changed.Task.IsCompleted)
+        fresh <- true
+        changed.SetResult()
+        for peer in peers do
+            let! answer = bounded peer
+            Assert.Equal(Str "published", answer)
+        Assert.Equal(1, calls)
+    })
+
+[<Fact>]
+let ``publication between watch capture and readiness read is not lost`` () =
+    let mutable changed = completed<unit> ()
+    let mutable reads = 0
+    let ctx : Requests.Ctx =
+        { Sources = []; WatchReadiness = fun () -> changed.Task
+          Readiness = fun _ ->
+              let first = Interlocked.Increment(&reads) = 1
+              if first then
+                  let previous = changed
+                  changed <- completed<unit> ()
+                  previous.SetResult()
+              // The first read observed old state just before publication.
+              System.Threading.Tasks.Task.FromResult(readyAt "new" (not first))
+          Evaluate = fun _ snapshot _ -> System.Threading.Tasks.Task.FromResult(Str snapshot) }
+    runQueue ctx (fun service -> task {
+        let! answer = bounded (service.Ask(queuedQuestion "publication race", CancellationToken.None))
+        Assert.Equal(Str "new", answer)
+        Assert.Equal(3, reads)
+    })
+
+[<Fact>]
+let ``failed publication watch fails the request instead of silently waiting`` () =
+    let failed = completed<unit> ()
+    failed.SetException(System.IO.IOException "publication notification failed")
+    let ctx : Requests.Ctx =
+        { Sources = []; WatchReadiness = fun () -> failed.Task
+          Readiness = fun _ -> System.Threading.Tasks.Task.FromResult(readyAt "one" true)
+          Evaluate = fun _ _ _ -> failwith "A failed readiness watch must not start inference" }
+    runQueue ctx (fun service -> task {
+        let! error = Assert.ThrowsAsync<System.IO.IOException>(fun () -> service.Ask(queuedQuestion "failed watch", CancellationToken.None) :> System.Threading.Tasks.Task)
+        Assert.Equal("publication notification failed", error.Message)
     })
 
 [<Fact>]
@@ -359,7 +433,8 @@ let ``final cancellation drains I O before next work occupies the model`` () =
     let entered, cleanup, finish = completed<unit> (), completed<unit> (), completed<unit> ()
     let mutable calls = 0
     let ctx : Requests.Ctx =
-        { Sources = []; Readiness = fun () -> readyAt "one" true
+        { Sources = []; Readiness = fun _ -> System.Threading.Tasks.Task.FromResult(readyAt "one" true)
+          WatchReadiness = fun () -> unchanged
           Evaluate = fun _ _ ct -> task {
               let call = Interlocked.Increment(&calls)
               if call = 1 then
@@ -389,7 +464,8 @@ let ``final cancellation drains I O before next work occupies the model`` () =
 let ``bounded epoch rotation retains no work from the previous epoch`` () =
     let mutable calls = 0
     let ctx : Requests.Ctx =
-        { Sources = []; Readiness = fun () -> readyAt "one" true
+        { Sources = []; Readiness = fun _ -> System.Threading.Tasks.Task.FromResult(readyAt "one" true)
+          WatchReadiness = fun () -> unchanged
           Evaluate = fun q _ _ -> System.Threading.Tasks.Task.FromResult(Interlocked.Increment(&calls) |> ignore; Str q.Text) }
     runQueue ctx (fun service -> task {
         for n in 1..140 do
@@ -403,10 +479,79 @@ let ``bounded epoch rotation retains no work from the previous epoch`` () =
     })
 
 [<Fact>]
+let ``last consumer releases all capacity waiters and a canceled waiter does not strand rotation`` () =
+    let entered, release = completed<unit> (), completed<unit> ()
+    let mutable calls = 0
+    let ctx : Requests.Ctx =
+        { Sources = []; Readiness = fun _ -> System.Threading.Tasks.Task.FromResult(readyAt "one" true)
+          WatchReadiness = fun () -> unchanged
+          Evaluate = fun q _ ct -> task {
+              Interlocked.Increment(&calls) |> ignore
+              if q.Text = "128" then entered.SetResult(); do! release.Task.WaitAsync ct
+              return Str q.Text } }
+    runQueue ctx (fun service -> task {
+        for n in 1..127 do
+            let! _ = bounded (service.Ask(queuedQuestion (string n), CancellationToken.None))
+            ()
+        let held = service.Ask(queuedQuestion "128", CancellationToken.None)
+        do! bounded entered.Task
+        // Completing a cached request also fences registry admission/release, so
+        // the following callers synchronously reach the full epoch's wait.
+        let! cached = bounded (service.Ask(queuedQuestion "127", CancellationToken.None))
+        Assert.Equal(Str "127", cached)
+        use canceled = new CancellationTokenSource()
+        let abandoned = service.Ask(queuedQuestion "129", canceled.Token)
+        let first = service.Ask(queuedQuestion "130", CancellationToken.None)
+        let second = service.Ask(queuedQuestion "131", CancellationToken.None)
+        Assert.False(first.IsCompleted); Assert.False(second.IsCompleted)
+        Assert.Equal(128, calls)
+        canceled.Cancel()
+        let! _ = Assert.ThrowsAnyAsync<OperationCanceledException>(fun () -> abandoned :> System.Threading.Tasks.Task)
+        release.SetResult()
+        let! _ = bounded held
+        let! a = bounded first
+        let! b = bounded second
+        Assert.Equal(Str "130", a); Assert.Equal(Str "131", b)
+        Assert.Equal(130, calls)
+        Assert.True((service.Snapshot()).Graph.Works.Length <= 2)
+    })
+
+[<Fact>]
+let ``readiness waits for a busy graph without requiring a publication event`` () = task {
+    match environment () with
+    | None -> ()
+    | Some(extensions, libduckdb) ->
+        use corpus = new Corpus(standard, engineOf extensions libduckdb, extensions)
+        corpus.Publish() |> ignore
+        let store = ManagedStore(corpus.Root, corpus.Config, corpus.Engine, promptFile)
+        let entered, release = completed<unit> (), completed<unit> ()
+        let held = System.Threading.Tasks.Task.Run(fun () ->
+            store.Call(fun _ -> entered.SetResult(); release.Task.GetAwaiter().GetResult(); Null))
+        try
+            do! bounded entered.Task
+            use canceled = new CancellationTokenSource()
+            let abandoned = store.ReadinessAsync(canceled.Token)
+            let pending = store.ReadinessAsync(CancellationToken.None)
+            Assert.False(pending.IsCompleted)
+            canceled.Cancel()
+            let! _ = Assert.ThrowsAnyAsync<OperationCanceledException>(fun () -> abandoned :> System.Threading.Tasks.Task)
+            release.SetResult()
+            let! ready = bounded pending
+            Assert.True(bool' ready "fresh")
+            let! _ = bounded held
+            ()
+        finally
+            release.TrySetResult() |> ignore
+            held.GetAwaiter().GetResult() |> ignore
+            store.Close()
+}
+
+[<Fact>]
 let ``service shutdown joins observers and cleanup and may be observed twice`` () = task {
     let entered, drained = completed<unit> (), completed<unit> ()
     let ctx : Requests.Ctx =
-        { Sources = []; Readiness = fun () -> readyAt "one" true
+        { Sources = []; Readiness = fun _ -> System.Threading.Tasks.Task.FromResult(readyAt "one" true)
+          WatchReadiness = fun () -> unchanged
           Evaluate = fun _ _ ct -> task {
               entered.SetResult()
               try

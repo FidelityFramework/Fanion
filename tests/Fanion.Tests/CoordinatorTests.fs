@@ -6,6 +6,7 @@ open System
 open System.Diagnostics
 open System.IO
 open System.Threading
+open System.Threading.Tasks
 open Xunit
 open Fanion.Canonical
 open Fanion.Tests.IndexStateTests
@@ -208,3 +209,108 @@ let ``unchanged active generation resolves while another process holds its write
                 child.StandardInput.WriteLine()
                 child.StandardInput.Flush()
                 if not(child.WaitForExit 5000) then child.Kill(true); child.WaitForExit()
+
+// Subscribe before reading state so publication cannot disappear between the
+// assertion and its wait. The deadline is shorter than periodic reconciliation.
+let private awaitState (changes: Fanion.IndexState.Changes) (running: Task<unit>) condition = task {
+    use deadline = new CancellationTokenSource(TimeSpan.FromSeconds 10.)
+    let mutable matched = false
+    while not matched do
+        let changed = changes.Watch()
+        matched <- condition()
+        if not matched then
+            let! completed = Task.WhenAny(changed :> Task, running :> Task).WaitAsync(deadline.Token)
+            if Object.ReferenceEquals(completed, running) then
+                do! running
+                failwith "Coordinator exited before the expected state"
+            else
+                do! changed.WaitAsync(deadline.Token)
+}
+
+[<Fact>]
+let ``push notifications drive repeated publication and unchanged hints remain idle`` () = task {
+    match environment () with
+    | None -> Assert.Skip "Verified native engine required"
+    | Some(extensions, libduckdb) ->
+        use lab = new Lab()
+        use stop = new CancellationTokenSource()
+        let configured = { options lab extensions libduckdb with SettleSeconds = None; MaxSettleSeconds = None }
+        let coordinator = Fanion.Coordinator.Coordinator(configured, stop.Token)
+        Assert.Empty(coordinator.Observe())
+        Assert.True(bool' (coordinator.RunOnce true) "published")
+        let before = coordinator.State.ActiveGeneration().Value
+        let receiptPath = Path.Combine(lab.Root, "last-build.json")
+        let initialReceipt = File.ReadAllBytes receiptPath
+        let retainedTime = DateTime(2020, 1, 1, 0, 0, 0, DateTimeKind.Utc)
+        let retained =
+            [ for source in [ "other"; "site" ] do
+                let path = coordinator.ComponentPath(source, before.Revisions.[source].Value)
+                File.SetLastWriteTimeUtc(path, retainedTime)
+                yield path, File.ReadAllBytes path ]
+        use changes = new Fanion.IndexState.Changes(Path.Combine(lab.Root, "index-state.sqlite"))
+        let running = Fanion.Coordinator.run coordinator changes stop.Token
+        try
+            coordinator.State.EventHint("unchanged-push", "other", "push") |> ignore
+            do! awaitState changes running (fun () ->
+                let plan = coordinator.State.PendingPlan()
+                plan.ObservationRequired.IsEmpty && plan.Targets.IsEmpty)
+            // A finite quiet interval lets the driver enter its wait; it does
+            // not poll or substitute for notification-driven acknowledgement.
+            do! Task.Delay 100
+            Assert.False(running.IsCompleted)
+            Assert.Equal(before.Generation, coordinator.State.ActiveGeneration().Value.Generation)
+            Assert.Equal<byte>(initialReceipt, File.ReadAllBytes receiptPath)
+
+            for ordinal in [ 1L; 2L ] do
+                let revision = lab.UpdateSpec(sprintf "# Specification\nPush %d evidence.\n" ordinal)
+                coordinator.State.EventHint(sprintf "changed-push-%d" ordinal, "spec", "push") |> ignore
+                do! awaitState changes running (fun () ->
+                    let active = coordinator.State.ActiveGeneration().Value
+                    let plan = coordinator.State.PendingPlan()
+                    active.Generation = before.Generation + ordinal
+                    && active.Revisions.["spec"] = Some revision
+                    && plan.ObservationRequired.IsEmpty && plan.Targets.IsEmpty)
+                for path, bytes in retained do
+                    Assert.Equal(retainedTime, File.GetLastWriteTimeUtc path)
+                    Assert.Equal<byte>(bytes, File.ReadAllBytes path)
+                // Give the completed demand time to park before the next push.
+                do! Task.Delay 100
+
+            stop.Cancel()
+            do! running.WaitAsync(TimeSpan.FromSeconds 10.)
+            let receipt = File.ReadAllBytes receiptPath |> JsonInput.parseBytes |> ofJson
+            Assert.True(bool' receipt "published")
+            Assert.Equal<string list>([ "spec" ], strings receipt "rebuilt")
+            Assert.Equal<Set<string>>(set [ "other"; "site" ], strings receipt "reused" |> Set.ofList)
+            Assert.Equal(before.Generation + 2L, coordinator.State.ActiveGeneration().Value.Generation)
+            Assert.Empty(coordinator.State.PendingPlan().Targets)
+            let number = function Float value -> value | Int value -> float value | Raw value -> JsonInput.number value | _ -> failwith "not a duration"
+            let pairs = function Obj values -> values | _ -> failwith "not a timing object"
+            let timing = field receipt "timing"
+            Assert.True(DateTimeOffset.TryParse(str' timing "started_at") |> fst)
+            let stages = match field timing "stages" with Arr values -> values | _ -> failwith "not a stage list"
+            Assert.NotEmpty stages
+            let mutable boundary, total = 0.0, 0.0
+            for stage in stages do
+                let start, finish, elapsed = number(field stage "start_seconds"), number(field stage "end_seconds"), number(field stage "seconds")
+                Assert.Equal(boundary, start, 8)
+                Assert.True(finish >= start)
+                Assert.Equal(finish - start, elapsed, 8)
+                boundary <- finish; total <- total + elapsed
+            Assert.Equal(number(field timing "seconds"), total, 8)
+            Assert.Equal(total, boundary, 8)
+            let generation = field (field timing "nested") "generation"
+            Assert.DoesNotContain(pairs generation, fun (name, _) -> name.StartsWith("relationship_", StringComparison.Ordinal))
+            let relationships = field generation "relationships"
+            let children = field relationships "phases" |> pairs
+            Assert.Equal<Set<string>>(set [ "scan"; "stage"; "join"; "read" ], children |> List.map fst |> Set.ofList)
+            Assert.True((children |> List.sumBy (snd >> number)) <= number(field relationships "seconds"))
+            // Existing flat phase consumers retain the same rounded values.
+            let legacy = field receipt "phases"
+            Assert.Equal(number(field legacy "relationships"), Math.Round(number(field relationships "seconds"), 3))
+            for name, elapsed in children do
+                Assert.Equal(number(field legacy ("relationship_" + name)), Math.Round(number elapsed, 3))
+        finally
+            stop.Cancel()
+            running.WaitAsync(TimeSpan.FromSeconds 10.).GetAwaiter().GetResult()
+}

@@ -34,16 +34,18 @@ Acknowledgment means the hint was recorded; it does not mean the graph is ready.
 
 1. A new hint marks its source as requiring observation. Latest freshness fails
    immediately.
-2. The indexer sees the hint on its loop and resolves configured refs against
-   the configured remote. Its ordinary loop waits five seconds, reducing to
-   one second while observing or settling. A separate 30-second sweep catches
-   missed notifications; startup also observes all sources.
+2. A local state notification wakes the indexer's Incremental execution slot.
+   It observes the hinted sources against the configured remote. Startup and
+   a 30-second reconciliation deadline observe all sources to recover missed
+   hooks; ordinary push handling does not wait for that deadline.
 3. Observation time is taken when fetching begins. A hint arriving during that
    observation remains pending. Network/authentication failures do not become
    deletion tombstones.
-4. After an existing generation, changed heads settle for five seconds, bounded
-   at 60 seconds from the first change. Rechecks of unchanged heads do not
-   extend the window. First generation and explicit `--once` skip settling.
+4. After an existing generation, changed heads settle for 250 milliseconds,
+   capped at one second from the first change. Further changed heads reset the
+   short debounce, including repeated changes to one source, without moving
+   the cap. Rechecks of unchanged heads do not extend it. First generation and
+   explicit `--once` skip settling.
 5. The durable plan includes changed components, transitive dependents, desired
    revisions and the base generation. Extraction reuses unaffected components;
    cross-linking runs against the complete assembled corpus.
@@ -53,7 +55,10 @@ Acknowledgment means the hint was recorded; it does not mean the graph is ready.
    publishing. A superseded build cannot replace the current generation.
 7. Freshness requires recent observations, no pending changes and matching
    published revisions. The service uses a 90-second observation age bound.
-   Waiting text requests proceed only after this fence passes.
+   Publication wakes waiting text requests, which proceed only after this
+   fence passes. Waiters subscribe before reading durable state. State reads
+   share SQLite's write barrier, so an early file notification cannot expose a
+   partially committed update. Notifications carry no authoritative state.
 
 Force pushes are revision changes without an ancestry assumption. Confirmed
 branch deletion removes that source's content through a tombstone plan.
@@ -140,3 +145,27 @@ live coordinator database on NFS. Back up coherent coordinator state and graph
 artifacts together. Query progress percentages do not describe this lifecycle:
 ordinary graph execution is milliseconds, while requests wait for admission,
 source observation or completed publication.
+
+## Measuring a reindex
+
+The operator command submits invalidation to the running indexer and waits for
+its publication notification. It does not restart either service:
+
+```bash
+retrieval-native reindex --root /var/lib/retrieval \
+  --config /etc/retrieval/corpus.json --sources composer,clef,alex
+```
+
+Use `--sources all` for the full configured corpus. Run each case from a fresh,
+idle generation. Concurrent source activity invalidates the timing trial rather
+than being attributed to it. This re-extracts current heads; it is not a synthetic
+code push. A real push additionally includes webhook delivery and authoritative
+discovery of the new head.
+
+The JSON records acceptance and durable publication timestamps, with receipt
+delivery measured separately. Its build timeline partitions execution into
+prepare, fetch/extract, generation, verify/persist, final head observation and
+publication. Child timings under `nested` are already included in their parent;
+never add them to the parent. Fetch/extract includes only the targeted component
+work, while cross-linking considers the complete assembled corpus. Keep every
+trial, including failures, when comparing one, three, five and all sources.

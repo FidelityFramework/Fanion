@@ -1,12 +1,13 @@
-/// Durable indexing coordination over the SQLite schema the Python gateway reads.
-/// Semantics follow the reference module exactly: hints are never revision
-/// authority, builds are leased, publication is fenced on the desired set.
+/// F# indexing authority persisted in SQLite: hints never establish revisions,
+/// builds are leased, and publication is fenced on the complete desired set.
 module Fanion.IndexState
 
 open System
 open System.Collections.Generic
+open System.IO
 open System.Security.Cryptography
 open System.Text.RegularExpressions
+open System.Threading.Tasks
 open Microsoft.Data.Sqlite
 open Fidelity.Data.JSON
 open Fanion.Canonical
@@ -19,8 +20,45 @@ let private revisionPattern = Regex(@"\A(?:[0-9a-f]{40}|[0-9a-f]{64})\z", RegexO
 let private snapshotPattern = Regex(@"\A[0-9a-f]{64}\z", RegexOptions.Compiled)
 let eventKinds = set [ "push"; "site_deploy"; "spec_deploy"; "delete"; "reconcile" ]
 let futureTolerance = 5.0
-let settleSecondsDefault = 5.0
-let maxSettleSecondsDefault = 60.0
+let settleSecondsDefault = 0.25
+let maxSettleSecondsDefault = 1.0
+
+/// Hosted wakeups only: capture Watch before reading SQLite, then await if still
+/// pending. The durable state remains authoritative, including after lost hints.
+type Changes(path: string) =
+    let fullPath = Path.GetFullPath path
+    let gate = obj ()
+    let completion () = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+    let mutable changed = completion ()
+    let mutable failure: exn option = None
+    let watcher = new FileSystemWatcher(Path.GetDirectoryName fullPath)
+    let relevant candidate = candidate = fullPath || candidate = fullPath + "-wal"
+    let signal () =
+        lock gate (fun () ->
+            if failure.IsNone then
+                let previous = changed
+                changed <- completion ()
+                previous.TrySetResult(()) |> ignore)
+    let fail error =
+        lock gate (fun () ->
+            if failure.IsNone then
+                failure <- Some error
+                changed.TrySetException(error: exn) |> ignore)
+    do
+        watcher.NotifyFilter <- NotifyFilters.FileName ||| NotifyFilters.LastWrite ||| NotifyFilters.Size
+        watcher.Changed.Add(fun event -> if relevant event.FullPath then signal ())
+        watcher.Created.Add(fun event -> if relevant event.FullPath then signal ())
+        watcher.Deleted.Add(fun event -> if relevant event.FullPath then signal ())
+        watcher.Renamed.Add(fun event -> if relevant event.FullPath || relevant event.OldFullPath then signal ())
+        watcher.Error.Add(fun event -> fail (IOException("SQLite change notifications failed", event.GetException())))
+        watcher.EnableRaisingEvents <- true
+
+    member _.Watch() : Task<unit> = lock gate (fun () -> changed.Task)
+
+    interface IDisposable with
+        member _.Dispose() =
+            fail (ObjectDisposedException(nameof Changes))
+            watcher.Dispose()
 
 let private identifier (value: string) (label: string) =
     if isNull value || not (idPattern.IsMatch value) then raise (StateError(sprintf "Invalid %s; use 1–128 ASCII identifier characters" label))
@@ -122,6 +160,9 @@ type State(path: string, allowedSources: (string * string list) list, ?leaseSeco
         if not (List.contains "changed_at" columns) then
             exec "ALTER TABLE sources ADD COLUMN changed_at REAL"
             exec "UPDATE sources SET changed_at=observed_at WHERE changed_at IS NULL"
+        if not (List.contains "first_changed_at" columns) then
+            exec "ALTER TABLE sources ADD COLUMN first_changed_at REAL"
+            exec "UPDATE sources SET first_changed_at=changed_at WHERE indexed_known=0 OR desired_revision IS NOT indexed_revision"
         let existing = (use c = connection.CreateCommand() in c.CommandText <- "SELECT value FROM metadata WHERE key='configuration'"; readRows c)
         match existing with
         | row :: _ when str row "value" <> configuration -> raise (StateError "Allowed sources/dependencies differ from this state's configuration; use an explicit migration")
@@ -141,7 +182,9 @@ type State(path: string, allowedSources: (string * string list) list, ?leaseSeco
     member _.MaxSettleSeconds = maxSettleSeconds
     member _.Now() = now ()
 
-    /// Run `body` inside BEGIN IMMEDIATE after expiring stale leases; commit on success.
+    /// BEGIN IMMEDIATE also fences reads behind any uncommitted writer: an early
+    /// filesystem notification cannot consume a wakeup and observe pre-commit state.
+    /// Expire stale leases, run `body`, and commit on success.
     member private _.Transaction(body: SqliteConnection -> float -> 'T) : 'T =
         use connection = connect ()
         let exec text = (use c = connection.CreateCommand() in c.CommandText <- text; c.ExecuteNonQuery() |> ignore)
@@ -199,7 +242,11 @@ type State(path: string, allowedSources: (string * string list) list, ?leaseSeco
         let generation = State.Query connection "SELECT MAX(generation) AS g FROM generations" [] |> List.head
         let baseGeneration = match generation.["g"] with null -> None | v -> Some(Convert.ToInt64 v)
         let changeTimes = [ for source in changed -> (match num rows.[source] "changed_at" with Some c -> c | None -> (num rows.[source] "observed_at").Value) ]
-        let settleUntil = if changeTimes.IsEmpty then None else Some(min (List.max changeTimes + settleSeconds) (List.min changeTimes + maxSettleSeconds))
+        let firstChangeTimes = [ for source in changed ->
+                                    num rows.[source] "first_changed_at"
+                                    |> Option.orElseWith (fun () -> num rows.[source] "changed_at")
+                                    |> Option.defaultWith (fun () -> (num rows.[source] "observed_at").Value) ]
+        let settleUntil = if changeTimes.IsEmpty then None else Some(min (List.max changeTimes + settleSeconds) (List.min firstChangeTimes + maxSettleSeconds))
         let epoch = Int64.Parse(str (State.Query connection "SELECT value FROM metadata WHERE key='desired_epoch'" [] |> List.head) "value")
         let revisionOf (row: Row) = match str row "desired_revision" with null -> None | r -> Some r
         let plan =
@@ -245,7 +292,10 @@ type State(path: string, allowedSources: (string * string list) list, ?leaseSeco
                     if previous = Some observedAt && desired <> revision then raise (StateError "Conflicting revisions at the same observation timestamp")
                     if previous.IsNone || desired <> revision then
                         changed.Add source
-                        State.Execute connection "UPDATE sources SET changed_at=$t WHERE source_id=$s" [ "$t", box observedAt; "$s", box source ]
+                        let indexed = match str row "indexed_revision" with null -> None | value -> Some value
+                        let dirty = int64Of row "indexed_known" = 0L || indexed <> revision
+                        State.Execute connection "UPDATE sources SET changed_at=$t,first_changed_at=CASE WHEN $dirty THEN COALESCE(first_changed_at,$t) ELSE NULL END WHERE source_id=$s"
+                            [ "$t", box observedAt; "$dirty", box dirty; "$s", box source ]
                     let hint = State.Query connection "SELECT COALESCE(MAX(seq),0) AS h FROM events WHERE source_id=$s AND created_at<=$t" [ "$s", box source; "$t", box observedAt ] |> List.head
                     State.Execute connection "UPDATE sources SET desired_revision=$r,observed_at=$t,observed_hint=$h WHERE source_id=$s"
                         [ "$r", (match revision with Some r -> box r | None -> null); "$t", box observedAt; "$h", box (int64Of hint "h"); "$s", box source ]
@@ -267,7 +317,7 @@ type State(path: string, allowedSources: (string * string list) list, ?leaseSeco
         if isNull reason || reason.Trim() = "" || reason.Length > 1024 then raise (StateError "Invalidation reason must be 1–1024 characters")
         this.Transaction(fun connection now ->
             for source in sourceIds do
-                State.Execute connection "UPDATE sources SET indexed_known=0 WHERE source_id=$s" [ "$s", box source ]
+                State.Execute connection "UPDATE sources SET indexed_known=0,changed_at=$t,first_changed_at=COALESCE(first_changed_at,$t) WHERE source_id=$s" [ "$s", box source; "$t", box now ]
                 State.Execute connection "INSERT INTO invalidations(source_id,reason,created_at) VALUES ($s,$r,$t)" [ "$s", box source; "$r", box reason; "$t", box now ]
             State.Execute connection "UPDATE metadata SET value=CAST(value AS INTEGER)+1 WHERE key='desired_epoch'" []
             let plan = this.ComputePlan connection
@@ -335,7 +385,7 @@ type State(path: string, allowedSources: (string * string list) list, ?leaseSeco
                     | existing :: _ when State.ParseRevisions(JsonInput.parse (str existing "revisions")) <> current.DesiredRevisions -> raise (StateError "Snapshot ID already identifies different source revisions")
                     | _ -> ()
                     for kv in indexed do
-                        State.Execute connection "UPDATE sources SET indexed_revision=$r,indexed_known=1 WHERE source_id=$s" [ "$r", (match kv.Value with Some r -> box r | None -> null); "$s", box kv.Key ]
+                        State.Execute connection "UPDATE sources SET indexed_revision=$r,indexed_known=1,changed_at=NULL,first_changed_at=NULL WHERE source_id=$s" [ "$r", (match kv.Value with Some r -> box r | None -> null); "$s", box kv.Key ]
                     State.Execute connection "INSERT INTO generations(snapshot_id,revisions,published_at,build_token) VALUES ($i,$r,$p,$t)"
                         [ "$i", box snapshotId; "$r", box (jsonText (revisionsJ current.DesiredRevisions)); "$p", box now; "$t", box token ]
                     let generation = State.LastRowId connection

@@ -110,9 +110,10 @@ let private dispatch (ctx: Ctx) (payload: JsonValue) (cancellation: System.Threa
 
 let run (options: Options) : int =
     let store = ManagedStore(options.Root, options.Config, options.Engine, options.PromptFile)
+    use changes = new IndexState.Changes(Path.Combine(options.Root, "index-state.sqlite"))
     let english = EnglishService(store, options.Model)
     let requestCtx : Requests.Ctx =
-        { Readiness = store.Readiness; Sources = store.ConfiguredSources
+        { Readiness = store.ReadinessAsync; WatchReadiness = changes.Watch; Sources = store.ConfiguredSources
           Evaluate = fun q snapshot ct -> english.AskAsync(q.Text, Some snapshot, q.Limit, q.MaxChars, q.IncludeContext, q.IncludeQuery, q.IncludeResults, ct) }
     let requests = new Requests.Service(requestCtx)
     let builder = WebApplication.CreateBuilder()

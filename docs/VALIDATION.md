@@ -78,6 +78,27 @@ further tuning is a separate change. These single checks do not establish
 a speedup. The [installed-unit binding](DUCKDB-2.md#indexing-and-cross-linking-measurements)
 records the lab follow-up separately from the original deployment bundle.
 
+The 22- and 29-second figures above include restarting the indexer and waiting
+for the supervisory check. They are not measurements of ordinary push latency.
+The event-driven indexer replaces the old five-second polling interval and
+five-second settling window with notification-driven execution and a 250 ms
+debounce capped at one second. Its operator `reindex` command measures a running
+service without restarting it; see the [measurement protocol](WEBHOOKS.md#measuring-a-reindex).
+Report one monotonic submission-to-observed-publication total for each of the
+one-, three-, five- and 24-source cases. Indent build stages under that total and
+generation phases under their build stage. Receipt delivery is outside the
+headline interval. These are current-head re-extractions, not changed-push
+measurements; retain all trials and failures.
+
+The event-driven change passed 171 tests with the two retained external-validator
+skips. Four discriminating controls were detected: subscribing after a readiness
+read, suppressing the coordinator wake-up, moving the first-change debounce cap,
+and weakening the SQLite commit-visibility barrier. The final nested timing
+format then passed all four coordinator cases, including exact consecutive
+bookends and exclusion of relationship children from their parent sum. These
+checks establish behavior and measurement structure; the four live reindex
+durations remain a separate operational measurement.
+
 Broader TOML invalid-input validation and XML rejection
 semantics remain separate owning-library work, not conformance claims for this
 increment.

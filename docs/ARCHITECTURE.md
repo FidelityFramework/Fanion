@@ -8,11 +8,11 @@ publishes generations. They share local durable coordinator state.
 | --- | --- |
 | `Serve.fs` | Oxpecker/Kestrel HTTP boundary, explicit ctx, authentication and bounded bodies |
 | `Requests.fs` | Caller lifetimes, exact question/snapshot identities, admission and retained results |
-| Incremental `AsyncMailbox` | One model execution slot, independent demand, cancellation and physical drain |
+| Incremental `AsyncMailbox` | Separate bounded model and index execution hosts, independent demand, cancellation and physical drain |
 | Ranvier graph in `Requests.fs` | Pure pull projections of published readiness and configured remit |
 | `English.fs` | Seed discovery, constrained model calls and query/result validation |
 | `Query.fs` | Pinned graph access, bounded execution and source hydration |
-| `IndexState.fs` | Durable hints, observations, dependency plans, build leases and publication fence |
+| `IndexState.fs` | Durable hints, observations, dependency plans, build leases, publication fence and local change notifications |
 | `Coordinator.fs` | Authoritative Git observation, component reuse, cross-linking and staged generation checks |
 | `Extract.fs`, `Enrich.fs`, `Generation.fs` | Committed source extraction, evidenced relationships and immutable graph artifacts |
 | `Load.fs` | Native engine connection lifetime, verified engine/extension artifacts and graph construction |
@@ -23,6 +23,10 @@ An agent submits text and waits for JSON. The service admits up to 64 callers.
 Readiness must establish a fresh latest snapshot with matching current identity
 before model execution starts. Waiting for indexing consumes the caller's
 budget without occupying the model execution slot.
+Waiters capture a state notification before reading readiness and await
+publication rather than polling. Capacity waiters likewise wake when a consumer
+releases retained work. Graph readiness waits for the existing connection gate;
+a busy connection does not masquerade as stale publication.
 
 A question's options and snapshot form its work identity. Independent callers
 hold independent demands on the same computation. Canceling one consumer
@@ -72,8 +76,18 @@ Queries use one generation throughout discovery, traversal and hydration.
 Freshness is checked before and after access. Corpus construction and
 cross-linking must finish before waiting text requests proceed.
 
+Push notifications wake the indexer's single Incremental effect slot. It observes
+hinted sources and uses a 250 ms resettable debounce, capped at one second from
+the first change, to collect coordinated pushes. Only the next debounce or
+reconciliation deadline creates a timer; there is no idle polling interval.
+The 30-second authoritative sweep remains recovery for missed webhooks. Durable
+state owns the pending work, so notification delivery does not replace recovery
+after a restart. Shutdown joins the physical indexing worker.
+
 The engine locks bind the native artifact. Its identity participates in generation
-hashing and is checked on build, renamed-file verification and store opening.
+hashing and is checked on build, artifact verification and store opening. A new
+artifact is verified once before its atomic rename; the rename does not require
+reopening and rechecking identical bytes.
 `Load.openEngine` activates DuckPGQ independently on every connection. The
 [native-engine contract](DUCKDB-2.md) belongs to this same publication path.
 
