@@ -2,10 +2,14 @@
 
 Fanion targets the paired source build recorded in its engine locks: DuckDB
 `v2.0.0-dev1`, source `45f4fdf315`, with built-in DuckPGQ `6b1d4b021d`.
-This is a pinned development build, not the final 2.0.0 release. It was deployed
-on October 20, 2026, after the complete 24-repository corpus passed side-index
-validation. All 18 subsequent HTTPS text-to-JSON acceptance responses matched
-snapshot-pinned graph results and source provenance.
+This is a pinned development build, not the final 2.0.0 release. The latest SQL
+cross-linking and Fidelity.Data rollout completed on October 20, 2026, at
+18:19:57 UTC, with release manifest
+`f936a4cdad287c1babafff0a07c74d074c2bbc2747a6496d765e182292db614d`.
+The complete 24-repository corpus passed side-index validation and was published
+fresh. All 18 subsequent HTTPS text-to-JSON responses matched snapshot-pinned
+graph results and source provenance: first requests took 1.017–1.487 seconds,
+identical repeats 8–9 ms and four callers 1.035–1.309 seconds.
 
 ## Build and connection contract
 
@@ -106,6 +110,28 @@ Check the active-generation identity first; never move a serving generation.
 matching now expressed as SQL over temporary staging tables. The earlier
 4,685-row module-open experiment covered only one rule family.
 
+The live 24-repository rollout above published snapshot
+`3a5d6bb56f160fdd1c260c6e308bcfbcf35fa61836393d5cc711062301a6630a`.
+Its recorded generation phases were:
+
+| Phase | Seconds |
+| --- | ---: |
+| Component parsing and verification | 1.032 |
+| Relationships, including preparation | 1.755 |
+| Canonical ordering and hashing | 0.536 |
+| Validation | 0.035 |
+| Graph loading | 0.345 |
+| Checkpoint and transaction completion | 1.119 |
+| **Total recorded generation phases** | **4.822** |
+
+Within the relationship phase, scanning took 0.680 seconds, staging 0.209,
+SQL joining 0.407 and reading the result 0.017. These are nested measurements;
+adding them again would double-count work. The 1.755-second relationship phase
+and its 0.407-second join are not complete rebuild times. Generation starts
+from extracted components; ref observation, extraction and service activation
+are outside this table. A complete rebuild under the actual
+`retrieval-indexer.service` unit remains a pending capacity gate.
+
 The full migration fixture contains 23 pinned repositories, 16,273 nodes,
 29,458 total edges and 10,760 derived edges across all relationship families.
 Both one-thread and eight-thread runs of the SQL migration matched every stored
@@ -113,7 +139,8 @@ column, row order, metadata and canonical snapshot hash. The subsequent
 Fidelity.Data integration preserves that parity. Its first parser implementation
 regressed generation to 11.8–15.2 seconds; fixing ordinary string-run parsing
 in Fidelity.Data brings the three candidate trials to 3.697, 3.304 and 2.983
-seconds. The previous pre-SQL implementation took 2.42–2.86 seconds, so this
+seconds on Z13. These local 23-repository trials are distinct from the live
+24-repository rollout above. The previous pre-SQL implementation took 2.42–2.86 seconds, so this
 does not establish an overall speedup. SQL joining takes 268–321 ms in the
 latest trials. Parsing, hashing and the durable commit remain part of the
 queued generation interval. These measurements exclude source extraction and

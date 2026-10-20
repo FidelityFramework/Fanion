@@ -657,66 +657,63 @@
     "response_sha256": "afee89fc414d9ea6aabb6627198edc2201e690bbf185bc32ba42fe92b33c6110"
   },
   "live_acceptance": {
-    "snapshot_id": "4e0641013249649bfcb1587f25fd62889ba61be5a66a11dff008df39cc97b832",
+    "snapshot_id": "3a5d6bb56f160fdd1c260c6e308bcfbcf35fa61836393d5cc711062301a6630a",
     "scope": "Full HTTPS text question to complete JSON; fixed loaded Magnitude model/profile; direct graph correctness oracle",
-    "receipt_sha256": "29ab9fba29646d436535e779455dcd0ae464362b4945427b8871821aaaecc011",
     "cases": [
       {
         "case": "outgoing",
-        "seconds": 1.0047342,
-        "repeat_seconds": 0.0081627,
+        "seconds": 1.0167898,
+        "repeat_seconds": 0.0076077000000000002,
         "concurrent_seconds": [
-          1.2650197,
-          1.2590719,
-          1.2677204,
-          1.2615683
+          1.3003880000000001,
+          1.3048237,
+          1.2985453,
+          1.3088876
         ],
         "correct": true,
         "rows": 5,
-        "source_records": 4,
-        "answer_sha256": "7a6d3a2bac6f123bb7a87a83359a4423073f5b5455afdd9b2dcd7ad5e3524992"
+        "source_records": 4
       },
       {
         "case": "incoming",
-        "seconds": 1.3378764,
-        "repeat_seconds": 0.0100714,
+        "seconds": 1.4873078,
+        "repeat_seconds": 0.0090153999999999998,
         "concurrent_seconds": [
-          1.0704096,
-          1.0635724,
-          1.0666747,
-          1.073117
+          1.0374696999999999,
+          1.0403741,
+          1.0348793999999999,
+          1.0439491999999999
         ],
         "correct": true,
         "rows": 8,
-        "source_records": 4,
-        "answer_sha256": "244aac43f8bc17628bcc9c24e7ae7b6e2eecb32cc1133f2467a409e9c17476d6"
+        "source_records": 4
       },
       {
         "case": "chunks",
-        "seconds": 1.2895522,
-        "repeat_seconds": 0.0076228,
+        "seconds": 1.2919546,
+        "repeat_seconds": 0.0076572999999999997,
         "concurrent_seconds": [
-          1.0484361,
-          1.0431676,
-          1.0512466,
-          1.0454475
+          1.090481,
+          1.093677,
+          1.0875165,
+          1.0850788
         ],
         "correct": true,
         "rows": 2,
-        "source_records": 2,
-        "answer_sha256": "d1502d13427a4e5d068e120c3d24bf3d8925e20379103cd12718fd915207ae0c"
+        "source_records": 2
       }
-    ]
+    ],
+    "receipt_sha256": "c5459cc06b5cd5a546e76a4f0ebdf5fe81050bbcd136c3d152c05a2f1dfc2b7b"
   },
   "deployment": {
     "status": "deployed",
-    "manifest_sha256": "7cf3dfc0673f8bb4f805fb92a2ae32762e8734a72444c0afb6c00f4a0a521848",
+    "manifest_sha256": "f936a4cdad287c1babafff0a07c74d074c2bbc2747a6496d765e182292db614d",
     "ready": true,
-    "snapshot_id": "4e0641013249649bfcb1587f25fd62889ba61be5a66a11dff008df39cc97b832",
+    "snapshot_id": "3a5d6bb56f160fdd1c260c6e308bcfbcf35fa61836393d5cc711062301a6630a",
     "repositories": 24,
     "schema_find_sources_pgq": "passed",
     "query_threads": 8,
-    "extractor_fingerprint": "1de73fc80c19145365f73188470c1e4682000c0a3b58a490701ebfe54f79376a",
+    "extractor_fingerprint": "8756ab1b3aaa6144311826e95d9b3076a9cd0cca0eae16265241f1d593720fe8",
     "query_prompt_sha256": "977f12a7c48830619bb4042c46010b9c4df7cf75fe1ad1ac5c2fc83e4678cffa",
     "fresh": true,
     "english": {
@@ -726,7 +723,7 @@
       "response_format": "magnitude_gbnf"
     },
     "credentials_and_model_binding": "preserved",
-    "log_sha256": "0e1f85737acb3d32ed5708d88701334e2be04f70a3032117a3fba8f84e690a12"
+    "log_sha256": "1782447d63c1db0d11a5de27491861191d72c1549eb638b29c96179ca9dc60ca"
   },
   "measurement_host_sha256": {
     "graph-static.fsx": "23f027e094714394d5e2bb79d280634b8d0fee4ace4c4188dc391f97265dee62",
@@ -1043,7 +1040,7 @@
       }
     ],
     "full_field_parity": true,
-    "interpretation": "All stored fields, provenance, row order, metadata and canonical snapshot match. The Fidelity.Data string-run fix removes the integration regression; no overall speedup over the pre-SQL implementation is established. Earlier unoptimized trials overlapped tests. Latest requests still wait for complete publication. Capacity covers the retained 23-component generation in Ubuntu24, excluding extraction and coordinator overhead; no live rollout is claimed.",
+    "interpretation": "All retained-fixture fields, provenance, row order, metadata and canonical identity match. Fidelity.Data string runs remove the integration regression; no overall speedup over the pre-SQL implementation is established. The complete 24-repository candidate is deployed and HTTPS acceptance passed. Live indexer cgroup rebuild validation is recorded separately from side-index success.",
     "validation": {
       "fanion_passed": 152,
       "fanion_skipped": 2,
@@ -1128,7 +1125,7 @@
     },
     "indexer_generation_capacity": {
       "scope": "Published generation CLI in existing Ubuntu24 userland; immutable 23-repository corpus; excludes extraction, coordinator publication and inference.",
-      "binary_sha256": "5740cffb45b220bf7e9c583aa9bcdc8881560f5d83e69f3bbca0898688325416",
+      "binary_sha256": "5e2415c1cfcc815f082cc09ce9806ca924a65ad9dc8308381df9cb54199ab839",
       "libduckdb_sha256": "0a90ff143d97da93014603b02ca298fcae01cf31988b9e87289b674a18087812",
       "baseline_manifest_sha256": "1edb44b1f189d53d0714e195d885acfc86de15510987f854296969425c9f76de",
       "exit_code": 0,
@@ -1136,28 +1133,28 @@
       "budget_passed": true,
       "canonical_snapshot_and_counts_match": true,
       "memory_max": "2147483648",
-      "memory_peak": "1647366144",
+      "memory_peak": "1673805824",
       "memory_events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
       "tasks_max": "128",
       "tasks_peak": "59",
       "tasks_events": "max 0",
-      "wall_seconds": 3.331476,
+      "wall_seconds": 3.5919387,
       "generation": {
         "capability_nodes": 69,
         "derived_edges": 10760,
         "edges": 29458,
         "nodes": 16273,
         "phases": {
-          "checkpoint": 0.487,
-          "components": 0.906,
-          "duckdb": 0.214,
-          "hash": 0.436,
-          "relationship_join": 0.272,
+          "checkpoint": 0.494,
+          "components": 0.816,
+          "duckdb": 0.219,
+          "hash": 0.431,
+          "relationship_join": 0.262,
           "relationship_read": 0.021,
-          "relationship_scan": 0.573,
-          "relationship_stage": 0.157,
-          "relationships": 1.15,
-          "validate": 0.05
+          "relationship_scan": 0.656,
+          "relationship_stage": 0.229,
+          "relationships": 1.292,
+          "validate": 0.049
         },
         "snapshot_id": "20a58ea9dc53d5b7384678b4e0efd59912f21a83e26df1083194e5e17e7a1dde",
         "stats": {
@@ -1231,6 +1228,128 @@
         },
         "threads": 8
       }
+    },
+    "live_rollout": {
+      "generation": {
+        "generation": 1,
+        "phases": {
+          "checkpoint": 1.119,
+          "components": 1.032,
+          "duckdb": 0.345,
+          "hash": 0.536,
+          "relationship_join": 0.407,
+          "relationship_read": 0.017,
+          "relationship_scan": 0.68,
+          "relationship_stage": 0.209,
+          "relationships": 1.755,
+          "validate": 0.035
+        },
+        "published": true,
+        "rebuilt": [
+          "alex",
+          "analyzers-sdk",
+          "barewire",
+          "bozzetto",
+          "calque",
+          "clef",
+          "clefautocomplete",
+          "composer",
+          "farscape",
+          "gobject",
+          "grammar",
+          "gtk3",
+          "incremental",
+          "lattice-analyzers",
+          "lattice-vim",
+          "lattice-vscode",
+          "platform",
+          "psg",
+          "site",
+          "spec",
+          "ui",
+          "wayland",
+          "webkit",
+          "wren"
+        ],
+        "replayed": false,
+        "reused": [],
+        "snapshot_id": "3a5d6bb56f160fdd1c260c6e308bcfbcf35fa61836393d5cc711062301a6630a",
+        "status": "completed"
+      },
+      "phase_scope": "Full 24-repository generation from components in the deployment side index; source extraction and remote observation are outside these phase timings.",
+      "indexer_unit_rebuild": "Pending controlled validation under the live indexer unit cgroup."
     }
+  },
+  "previous_deployment": {
+    "status": "deployed",
+    "manifest_sha256": "7cf3dfc0673f8bb4f805fb92a2ae32762e8734a72444c0afb6c00f4a0a521848",
+    "ready": true,
+    "snapshot_id": "4e0641013249649bfcb1587f25fd62889ba61be5a66a11dff008df39cc97b832",
+    "repositories": 24,
+    "schema_find_sources_pgq": "passed",
+    "query_threads": 8,
+    "extractor_fingerprint": "1de73fc80c19145365f73188470c1e4682000c0a3b58a490701ebfe54f79376a",
+    "query_prompt_sha256": "977f12a7c48830619bb4042c46010b9c4df7cf75fe1ad1ac5c2fc83e4678cffa",
+    "fresh": true,
+    "english": {
+      "version": "fidelity-english-pgq-v8",
+      "configured": true,
+      "model": "gemma-4-e4b-it-qat:gguf:q4",
+      "response_format": "magnitude_gbnf"
+    },
+    "credentials_and_model_binding": "preserved",
+    "log_sha256": "0e1f85737acb3d32ed5708d88701334e2be04f70a3032117a3fba8f84e690a12"
+  },
+  "previous_live_acceptance": {
+    "snapshot_id": "4e0641013249649bfcb1587f25fd62889ba61be5a66a11dff008df39cc97b832",
+    "scope": "Full HTTPS text question to complete JSON; fixed loaded Magnitude model/profile; direct graph correctness oracle",
+    "receipt_sha256": "29ab9fba29646d436535e779455dcd0ae464362b4945427b8871821aaaecc011",
+    "cases": [
+      {
+        "case": "outgoing",
+        "seconds": 1.0047342,
+        "repeat_seconds": 0.0081627,
+        "concurrent_seconds": [
+          1.2650197,
+          1.2590719,
+          1.2677204,
+          1.2615683
+        ],
+        "correct": true,
+        "rows": 5,
+        "source_records": 4,
+        "answer_sha256": "7a6d3a2bac6f123bb7a87a83359a4423073f5b5455afdd9b2dcd7ad5e3524992"
+      },
+      {
+        "case": "incoming",
+        "seconds": 1.3378764,
+        "repeat_seconds": 0.0100714,
+        "concurrent_seconds": [
+          1.0704096,
+          1.0635724,
+          1.0666747,
+          1.073117
+        ],
+        "correct": true,
+        "rows": 8,
+        "source_records": 4,
+        "answer_sha256": "244aac43f8bc17628bcc9c24e7ae7b6e2eecb32cc1133f2467a409e9c17476d6"
+      },
+      {
+        "case": "chunks",
+        "seconds": 1.2895522,
+        "repeat_seconds": 0.0076228,
+        "concurrent_seconds": [
+          1.0484361,
+          1.0431676,
+          1.0512466,
+          1.0454475
+        ],
+        "correct": true,
+        "rows": 2,
+        "source_records": 2,
+        "answer_sha256": "d1502d13427a4e5d068e120c3d24bf3d8925e20379103cd12718fd915207ae0c"
+      }
+    ]
   }
 }

@@ -51,12 +51,14 @@ Three complete generation trials now take 3.697, 3.304 and 2.983 seconds,
 with component parsing at 824, 585 and 578 ms. Every stored field and snapshot
 identity still matches. In Ubuntu 24.04 userland, the published executable
 builds the same graph under the indexer's 2,048 MiB / 128-task limits:
-1,571 MiB peak, 59 tasks, and no memory-limit, OOM or task-limit events.
+1,596 MiB peak, 59 tasks, and no memory-limit, OOM or task-limit events.
 That gate covers generation from 23 retained components, not extraction, the
 coordinator's own memory or the configured maximum source budget.
 
-These are local candidate gates; they do not change the accepted live-service
-measurements below. Broader TOML invalid-input validation and XML rejection
+These local candidate gates are distinct from the live-service measurements
+below. A complete rebuild under the actual `retrieval-indexer.service` unit
+remains a pending capacity gate; the rollout's side-index build does not establish
+that result. Broader TOML invalid-input validation and XML rejection
 semantics remain separate owning-library work, not conformance claims for this
 increment.
 The runtime queue acceptance has six lifecycle controls: shared computation
@@ -67,31 +69,48 @@ publication waiting or allowed an obsolete result were all detected.
 
 ## Live full-response measurement
 
-On October 20, 2026, the accepted paired DuckDB/DuckPGQ release
-`7cf3dfc0673f8bb4f805fb92a2ae32762e8734a72444c0afb6c00f4a0a521848`
-was exercised over HTTPS against the loaded Gemma E4B Q4 model on MGR's RTX
+On October 20, 2026, at 18:19:57 UTC, the SQL cross-linking and Fidelity.Data release
+`f936a4cdad287c1babafff0a07c74d074c2bbc2747a6496d765e182292db614d`
+completed its supervised rollout. All 24 configured repositories were published
+and fresh; loopback schema, find, sources and PGQ acceptance passed. The live
+service was then exercised over HTTPS against the loaded Gemma E4B Q4 model on MGR's RTX
 3050. Thinking remained off with immediate nested GBNF. Timing includes the
 text request, service processing and complete JSON response. The engine is
 the pinned `v2.0.0-dev1` source build described in [DuckDB 2.0](DUCKDB-2.md).
 
 | Question about one named Composer file | First measured request | Identical repeat | Four callers sharing a new question |
 | --- | ---: | ---: | ---: |
-| Outgoing links | 1.005 s | 0.008 s | 1.259–1.268 s |
-| Incoming links | 1.338 s | 0.010 s | 1.064–1.073 s |
-| Source chunks | 1.290 s | 0.008 s | 1.043–1.051 s |
+| Outgoing links | 1.017 s | 0.008 s | 1.299–1.309 s |
+| Incoming links | 1.487 s | 0.009 s | 1.035–1.044 s |
+| Source chunks | 1.292 s | 0.008 s | 1.085–1.094 s |
 
 All 18 responses matched direct snapshot-pinned graph oracles, pagination and
 source provenance. The snapshot was
-`4e0641013249649bfcb1587f25fd62889ba61be5a66a11dff008df39cc97b832`.
+`3a5d6bb56f160fdd1c260c6e308bcfbcf35fa61836393d5cc711062301a6630a`.
 The target was `docs/PSG_Nanopass_Architecture.md` in
 `FidelityFramework/Composer`. The model was resident and startup priming had
 run; these are ordinary runtime requests, not model-loading measurements.
+
+The rollout's recorded complete-generation phases total 4.822 seconds. The
+relationship phase accounts for 1.755 seconds, including a 0.407-second SQL join;
+neither is the complete indexing duration. Component parsing, hashing,
+validation, graph loading and checkpointing make up the rest. Source extraction,
+ref observation and service activation are outside those phase timings. The
+[phase breakdown](DUCKDB-2.md#indexing-and-cross-linking-measurements) and
+[numeric receipt](measurements/2026-10-20.json) retain those boundaries.
+
+The earlier paired-engine rollout on the same date,
+`7cf3dfc0673f8bb4f805fb92a2ae32762e8734a72444c0afb6c00f4a0a521848`,
+used snapshot `4e0641013249649bfcb1587f25fd62889ba61be5a66a11dff008df39cc97b832`.
+Its 18 correct responses took 1.005–1.338 seconds on first measured requests,
+8–10 ms on repeats and 1.043–1.268 seconds with four callers. These remain
+separate observations, not a controlled speed comparison between releases.
 
 This bounded check establishes those graph operations. Broader research
 questions can require two model completions and still need their own semantic
 acceptance cases. Grammar-valid JSON alone does not establish relevance.
 
-The paired 2.0 implementation passed 140 native tests, with two retained
+The earlier paired 2.0 implementation passed 140 native tests, with two retained
 external-validator skips. Removing grammar activation, engine source checking,
 generation binding, renamed-target verification or the active-file lock guard
 each failed its intended test;
