@@ -108,9 +108,10 @@ let private dispatch (ctx: Ctx) (payload: JsonValue) (cancellation: System.Threa
     | _ -> return raise (QueryError "action")
 }
 
-let run (options: Options) : int =
+/// The host owns the notification lifetime, including a nonzero stop on failure.
+let runWithChanges (createChanges: string -> IndexState.Changes) (options: Options) : int =
     let store = ManagedStore(options.Root, options.Config, options.Engine, options.PromptFile)
-    use changes = new IndexState.Changes(Path.Combine(options.Root, "index-state.sqlite"))
+    use changes = createChanges (Path.Combine(options.Root, "index-state.sqlite"))
     let english = EnglishService(store, options.Model)
     let requestCtx : Requests.Ctx =
         { Readiness = store.ReadinessAsync; WatchReadiness = changes.Watch; Sources = store.ConfiguredSources
@@ -217,5 +218,12 @@ let run (options: Options) : int =
     let routes = [ GET [ route "/health" (health ctx) ]; POST [ route "/v1/retrieval" (retrieval ctx); route "/v1/index/events/forgejo" (index ctx) ] ]
     app.UseRouting().UseOxpecker(routes).Run(Default.notFoundHandler)
     app.Lifetime.ApplicationStopping.Register(fun () -> requests.Close().GetAwaiter().GetResult(); store.Close()) |> ignore
-    app.Run()
-    0
+    let running = app.RunAsync()
+    Task.WhenAny(running, changes.Failure :> Task).GetAwaiter().GetResult() |> ignore
+    if changes.Failure.IsCompleted then
+        logger.LogCritical(changes.Failure.Result, "Publication notifications failed; stopping for supervised restart")
+        app.Lifetime.StopApplication()
+    running.GetAwaiter().GetResult()
+    if changes.Failure.IsCompleted then 1 else 0
+
+let run (options: Options) : int = runWithChanges (fun path -> new IndexState.Changes(path)) options

@@ -83,6 +83,10 @@ reconciliation deadline creates a timer; there is no idle polling interval.
 The 30-second authoritative sweep remains recovery for missed webhooks. Durable
 state owns the pending work, so notification delivery does not replace recovery
 after a restart. Shutdown joins the physical indexing worker.
+An unrecoverable notification-watcher error stops the affected host with a
+nonzero exit code; its existing service policy restarts it. Pending work stays
+in durable state. A failed build retries after successful source observation,
+bounded by the 30-second reconciliation deadline.
 
 The engine locks bind the native artifact. Its identity participates in generation
 hashing and is checked on build, artifact verification and store opening. A new

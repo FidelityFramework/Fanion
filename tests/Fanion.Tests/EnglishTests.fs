@@ -105,7 +105,7 @@ let mentionFiles (target: string) (count: int) =
 /// Local FidelityFramework/<name> repositories, a corpus configuration tracking them, and a
 /// published index root built by the real coordinator (the same route serve uses).
 type Corpus(repos: (string * (string * string) list) list, engine: Load.Engine, extensions: string) =
-    let temp = Path.Combine(Path.GetTempPath(), "english-" + Guid.NewGuid().ToString("N"))
+    let temp = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "../../.scratch/tests", "english-" + Guid.NewGuid().ToString("N")))
     let fixtures = Path.Combine(temp, "fixtures")
     let owner = Path.Combine(fixtures, "FidelityFramework")
     let repoDir (name: string) = Path.Combine(owner, name)

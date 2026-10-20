@@ -31,6 +31,7 @@ type Changes(path: string) =
     let completion () = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
     let mutable changed = completion ()
     let mutable failure: exn option = None
+    let failed = TaskCompletionSource<exn>(TaskCreationOptions.RunContinuationsAsynchronously)
     let watcher = new FileSystemWatcher(Path.GetDirectoryName fullPath)
     let relevant candidate = candidate = fullPath || candidate = fullPath + "-wal"
     let signal () =
@@ -43,6 +44,7 @@ type Changes(path: string) =
         lock gate (fun () ->
             if failure.IsNone then
                 failure <- Some error
+                failed.TrySetResult error |> ignore
                 changed.TrySetException(error: exn) |> ignore)
     do
         watcher.NotifyFilter <- NotifyFilters.FileName ||| NotifyFilters.LastWrite ||| NotifyFilters.Size
@@ -54,6 +56,8 @@ type Changes(path: string) =
         watcher.EnableRaisingEvents <- true
 
     member _.Watch() : Task<unit> = lock gate (fun () -> changed.Task)
+    /// The hosted process supervises this terminal notification failure.
+    member _.Failure : Task<exn> = failed.Task
 
     interface IDisposable with
         member _.Dispose() =

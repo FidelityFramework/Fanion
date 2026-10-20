@@ -30,15 +30,23 @@ let private read (response: HttpResponseMessage) =
 
 /// Serve.run blocks on Kestrel, so the gateway runs on a background thread for the
 /// lifetime of the test process; each test owns its root, port and token.
-type Server(corpus: Corpus, model: ModelClient option, secret: byte[] option) =
+type Server(corpus: Corpus, model: ModelClient option, secret: byte[] option, ?changes: IndexState.Changes) =
     let port = freePort ()
     let token = String('t', 48)
     let options : Fanion.Serve.Options =
         { Root = corpus.Root; Config = corpus.Config; Engine = corpus.Engine; PromptFile = promptFile; Token = token; WebhookSecret = secret
           Host = "127.0.0.1"; Port = port; Model = model }
     let client = new HttpClient(BaseAddress = Uri(sprintf "http://127.0.0.1:%d/" port), Timeout = TimeSpan.FromSeconds 120.0)
+    let stopped = System.Threading.Tasks.TaskCompletionSource<int>(System.Threading.Tasks.TaskCreationOptions.RunContinuationsAsynchronously)
     do
-        let thread = Thread(ThreadStart(fun () -> try Fanion.Serve.run options |> ignore with _ -> ()))
+        let thread = Thread(ThreadStart(fun () ->
+            try
+                let code =
+                    match changes with
+                    | Some watch -> Fanion.Serve.runWithChanges (fun _ -> watch) options
+                    | None -> Fanion.Serve.run options
+                stopped.TrySetResult code |> ignore
+            with error -> stopped.TrySetException error |> ignore))
         thread.IsBackground <- true
         thread.Start()
         let deadline = DateTime.UtcNow.AddSeconds 120.0
@@ -51,6 +59,7 @@ type Server(corpus: Corpus, model: ModelClient option, secret: byte[] option) =
                 if DateTime.UtcNow > deadline then failwith "gateway did not start"
                 Thread.Sleep 100
     member _.Token = token
+    member _.Stopped = stopped.Task
     member _.Get(path: string) =
         use response = client.Send(new HttpRequestMessage(HttpMethod.Get, path))
         read response
@@ -427,6 +436,39 @@ let ``failed publication watch fails the request instead of silently waiting`` (
         let! error = Assert.ThrowsAsync<System.IO.IOException>(fun () -> service.Ask(queuedQuestion "failed watch", CancellationToken.None) :> System.Threading.Tasks.Task)
         Assert.Equal("publication notification failed", error.Message)
     })
+
+[<Theory>]
+[<InlineData(true)>]
+[<InlineData(false)>]
+let ``watcher error stops a running gateway with nonzero status`` overflow = task {
+    match environment () with
+    | None -> ()
+    | Some(extensions, libduckdb) ->
+        use corpus = new Corpus(standard, engineOf extensions libduckdb, extensions)
+        corpus.Publish() |> ignore
+        use changes = new IndexState.Changes(System.IO.Path.Combine(corpus.Root, "index-state.sqlite"))
+        let server = Server(corpus, None, None, changes = changes)
+        corpus.Coordinator.State.InvalidateSources(["test"], "Watcher failure fixture") |> ignore
+        Assert.Equal(503, fst (server.Health()))
+        let pending = System.Threading.Tasks.Task.Run(fun () -> server.Call(Obj [ "action", Str "ask"; "text", Str "Which files does 0.md link to?" ]))
+        do! System.Threading.Tasks.Task.Delay 100
+        Assert.False(pending.IsCompleted)
+        // Raise the real FileSystemWatcher.Error event without exposing a runtime
+        // fault-injection command or exhausting the machine's inotify queue.
+        let flags = Reflection.BindingFlags.Instance ||| Reflection.BindingFlags.NonPublic
+        let watcher = typeof<IndexState.Changes>.GetFields(flags) |> Array.find (fun field -> field.FieldType = typeof<System.IO.FileSystemWatcher>) |> fun field -> field.GetValue changes
+        let fault: exn = if overflow then System.IO.InternalBufferOverflowException("Injected overflow") else System.IO.IOException("Injected watcher failure")
+        typeof<System.IO.FileSystemWatcher>.GetMethod("OnError", flags).Invoke(watcher, [|box (System.IO.ErrorEventArgs fault)|]) |> ignore
+        let! exitCode = bounded server.Stopped
+        Assert.NotEqual(0, exitCode)
+        Assert.True(changes.Failure.IsCompletedSuccessfully)
+        // Durable work survives the API stop; it remains publishable by its owner.
+        Assert.True(bool' (corpus.RunOnce()) "published")
+        try
+            let! status, _ = bounded pending
+            Assert.NotEqual(200, status)
+        with :? HttpRequestException -> ()
+}
 
 [<Fact>]
 let ``final cancellation drains I O before next work occupies the model`` () =
