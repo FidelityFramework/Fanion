@@ -70,8 +70,8 @@ let environment () =
 let engineOf (extensions: string) (libduckdb: string) : Load.Engine =
     use duckpgq = JsonDocument.Parse(File.ReadAllBytes(lockFile "duckpgq-lock.json"))
     use lib = JsonDocument.Parse(File.ReadAllBytes(lockFile "libduckdb-lock.json"))
-    { Extensions = extensions; LibDuckDb = libduckdb; LibDuckDbSha256 = lib.RootElement.GetProperty("libduckdb_so_sha256").GetString()
-      DuckPgqVersion = duckpgq.RootElement.GetProperty("extension_version").GetString(); DuckPgqSha256 = duckpgq.RootElement.GetProperty("sha256").GetString()
+    { LibDuckDb = libduckdb; LibDuckDbSha256 = lib.RootElement.GetProperty("libduckdb_so_sha256").GetString(); DuckDbVersion = lib.RootElement.GetProperty("duckdb_version").GetString(); DuckDbSourceId = lib.RootElement.GetProperty("duckdb_source_id").GetString()
+      DuckPgqVersion = duckpgq.RootElement.GetProperty("extension_version").GetString()
       Threads = 8; MemoryLimit = "1GB" }
 
 let private git (repo: string) (args: string list) =
@@ -135,7 +135,7 @@ type Corpus(repos: (string * (string * string) list) list, engine: Load.Engine, 
         File.WriteAllText(config, toText orderedCompactStyle (Obj [ "schema_version", Int 1L; "sources", Arr sources ]))
     let root = Path.Combine(temp, "state")
     let options : Retrieval.Native.Coordinator.Options =
-        { Root = root; Config = config; Extensions = extensions; Engine = engine
+        { Root = root; Config = config; Engine = engine
           Budgets = { MaxOutputBytes = 384L * 1024L * 1024L; MaxNodes = 100_000; MaxEdges = 200_000; MaxTreeEntries = 100_000L; MaxFiles = 20_000; MaxSourceBytes = 128L * 1024L * 1024L; MaxDerivedEdges = 50_000; MaxCapabilityNodes = 2048; MaxMetadataBytes = 32768 }
           ExtractLimits = { MaxRepositories = 64; MaxTreeEntries = 100_000L; MaxTreeBytes = 16 * 1024 * 1024; MaxFiles = 20_000; MaxFileBytes = 1024 * 1024; MaxSourceBytes = 128L * 1024L * 1024L; MaxNodes = 100_000; MaxEdges = 200_000; MaxOutputBytes = 384L * 1024L * 1024L; MaxLayerRules = 64; MaxRulePatterns = 32; MaxTotalRulePatterns = 256; MaxLinksPerFile = 1024; MaxBuildSeconds = 600.0; GitTimeoutSeconds = 15.0 }
           RemoteBase = fixtures; LeaseSeconds = 900.0; SettleSeconds = Some 0.0; MaxSettleSeconds = Some 0.0

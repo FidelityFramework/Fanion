@@ -91,7 +91,10 @@ let load (engine: Engine) (budgets: Budgets) (snapshotPath: string) (database: s
     let nodes = [| for n in root.GetProperty("nodes").EnumerateArray() -> Choice1Of2 n |]
     let edges = [| for e in root.GetProperty("edges").EnumerateArray() -> Choice1Of2 e |]
     if nodes.Length > budgets.MaxNodes || edges.Length > budgets.MaxEdges then raise (LoadError "Snapshot exceeds corpus bounds")
-    let metadata = Obj [ for p in root.EnumerateObject() do if p.Name <> "nodes" && p.Name <> "edges" then yield p.Name, Raw p.Value ]
+    // Offline import preserves its input identity; only generation() publishes.
+    // Include the host binding before enforcing the response metadata budget.
+    if root.TryGetProperty("engine") |> fst then verifyGenerationEngine engine root
+    let metadata = Obj ([ for p in root.EnumerateObject() do if p.Name <> "nodes" && p.Name <> "edges" && p.Name <> "engine" then yield p.Name, Raw p.Value ] @ [ "engine", engineIdentity engine ])
     if snd (digest defaultUnicodeStyle metadata) > int64 budgets.MaxMetadataBytes then raise (LoadError "Snapshot metadata exceeds the schema response budget")
     let metadataText = toText defaultStyle metadata
     let nodeRows, edgeRows = validateRows repositories nodes edges
@@ -179,6 +182,7 @@ let generation (engine: Engine) (budgets: Budgets) (components: ComponentSpec li
         formatFields @
         [ "repositories", Arr (sortedRepositories |> List.map Raw)
           "corpus_config_sha256", Str configIdentity
+          "engine", engineIdentity engine
           "tracked_sources", trackedSources
           "stats", statsJ stats
           "relationships", relationshipsJ ]

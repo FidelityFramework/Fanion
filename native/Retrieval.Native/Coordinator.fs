@@ -18,6 +18,23 @@ open Retrieval.Native.IndexState
 
 exception PipelineStopped of string
 
+// Linux host adapter: the generation filename must be durable before SQLite
+// can publish it. Corpus and publication semantics remain in their existing owners.
+[<DllImport("libc", EntryPoint = "open", SetLastError = true)>]
+extern int private openDirectory(string path, int flags)
+[<DllImport("libc", EntryPoint = "fsync", SetLastError = true)>]
+extern int private syncDirectory(int descriptor)
+[<DllImport("libc", EntryPoint = "close")>]
+extern int private closeDirectory(int descriptor)
+
+let private persistDirectory path =
+    let descriptor = openDirectory(path, 0x10000 ||| 0x80000) // O_DIRECTORY | O_CLOEXEC, read-only
+    if descriptor < 0 then raise (IOException("Cannot open generation directory for durability: " + string (Marshal.GetLastPInvokeError())))
+    try
+        if syncDirectory descriptor <> 0 then raise (IOException("Cannot persist generation directory: " + string (Marshal.GetLastPInvokeError())))
+    finally
+        closeDirectory descriptor |> ignore
+
 type Source =
     { Id: string; Repo: string; Ref: string; DependsOn: string list; LayerRules: JsonElement option; Policy: JsonElement option
       Normalized: Policy.Normalized; Raw: JsonElement }
@@ -93,7 +110,7 @@ let private atomicJson (path: string) (value: J) =
     File.Move(temporary, path, true)
 
 type Options =
-    { Root: string; Config: string; Extensions: string; Engine: Load.Engine; Budgets: Generation.Budgets; ExtractLimits: Extract.Limits
+    { Root: string; Config: string; Engine: Load.Engine; Budgets: Generation.Budgets; ExtractLimits: Extract.Limits
       RemoteBase: string; LeaseSeconds: float; SettleSeconds: float option; MaxSettleSeconds: float option; LockFiles: string list }
 
 type Coordinator(options: Options, stop: CancellationToken) =
@@ -193,7 +210,9 @@ type Coordinator(options: Options, stop: CancellationToken) =
         use connection = Load.openEngine options.Engine database
         let scalar (sql: string) = (use c = connection.CreateCommand() in c.CommandText <- sql; c.ExecuteScalar())
         let metadata = string (scalar "SELECT value FROM metadata")
-        (use d = JsonDocument.Parse(metadata) in if d.RootElement.GetProperty("snapshot_id").GetString() <> snapshotId then raise (InvalidOperationException "Staged generation identity differs"))
+        (use d = JsonDocument.Parse(metadata)
+         if d.RootElement.GetProperty("snapshot_id").GetString() <> snapshotId then raise (InvalidOperationException "Staged generation identity differs")
+         Load.verifyGenerationEngine options.Engine d.RootElement)
         match scalar "SELECT id FROM nodes WHERE kind='file' ORDER BY id LIMIT 1" with
         | :? string as seed ->
             scalar (sprintf "SELECT length(text) FROM nodes WHERE id='%s'" seed) |> ignore
@@ -241,11 +260,17 @@ type Coordinator(options: Options, stop: CancellationToken) =
                 let report = Generation.generation options.Engine options.Budgets (List.ofSeq components) identity tracked temporary
                 checkpoint ()
                 let target = Path.Combine(root, "generations", report.SnapshotId + ".duckdb")
-                if not (File.Exists target) then
+                let exists = File.Exists target
+                let alreadyActive = exists && (state.ActiveGeneration() |> Option.exists (fun current -> current.SnapshotId = report.SnapshotId))
+                if not exists then
                     this.Verify(temporary, report.SnapshotId)
                     checkpoint ()
                     (use handle = File.Open(temporary, FileMode.Open, FileAccess.Read) in handle.Flush(true))
                     File.Move(temporary, target)
+                // The serving process owns the active database's RW lock. Its
+                // engine-bound identity was verified at publication and Store open.
+                if not alreadyActive then this.Verify(target, report.SnapshotId)
+                persistDirectory (Path.GetDirectoryName target)
                 if not (this.Observe()).IsEmpty then raise (InvalidOperationException "Authoritative recheck failed; staged generation remains unpublished")
                 checkpoint ()
                 let result = state.CompleteBuild(token, report.SnapshotId, [ for kv in plan.Targets -> kv.Key, kv.Value ])

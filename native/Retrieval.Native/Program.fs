@@ -83,10 +83,17 @@ let private budgets (args: Args) : Generation.Budgets =
 
 let private engine (args: Args) : Load.Engine =
     let here = Path.GetDirectoryName(Environment.ProcessPath)
-    { Extensions = args.Required "--extensions"
-      LibDuckDb = args.Text("--libduckdb", Path.Combine(here, "libduckdb.so"))
-      LibDuckDbSha256 = args.Required "--libduckdb-sha256"
-      DuckPgqVersion = args.Required "--duckpgq-version"; DuckPgqSha256 = args.Required "--duckpgq-sha256"
+    use lib = JsonDocument.Parse(File.ReadAllBytes(args.Text("--libduckdb-lock", Path.Combine(here, "libduckdb-lock.json"))))
+    use pgq = JsonDocument.Parse(File.ReadAllBytes(args.Text("--duckpgq-lock", Path.Combine(here, "duckpgq-lock.json"))))
+    if pgq.RootElement.GetProperty("linkage").GetString() <> "static"
+       || pgq.RootElement.GetProperty("duckdb_version").GetString() <> lib.RootElement.GetProperty("duckdb_version").GetString()
+       || pgq.RootElement.GetProperty("duckdb_source_revision").GetString() <> lib.RootElement.GetProperty("duckdb_source_revision").GetString() then
+        raise (InvalidOperationException "DuckPGQ must match the reviewed DuckDB source and static artifact")
+    { LibDuckDb = args.Text("--libduckdb", Path.Combine(here, "libduckdb.so"))
+      LibDuckDbSha256 = lib.RootElement.GetProperty("libduckdb_so_sha256").GetString()
+      DuckDbVersion = lib.RootElement.GetProperty("duckdb_version").GetString()
+      DuckDbSourceId = lib.RootElement.GetProperty("duckdb_source_id").GetString()
+      DuckPgqVersion = pgq.RootElement.GetProperty("extension_version").GetString()
       Threads = args.Int("--threads", 8); MemoryLimit = args.Text("--memory-limit", "2GB") }
 
 let private extractLimits (args: Args) : Extract.Limits =
@@ -111,7 +118,7 @@ let private report (r: Generation.Report) =
 let main argv =
     try
         if argv.Length = 0 then
-            eprintfn "usage: retrieval-native serve --root DIR --config FILE --extensions DIR --token-file FILE --prompt-file FILE [--webhook-secret-file FILE] [--host H --port P]\n       retrieval-native index --root DIR --config FILE --extensions DIR [--once] [--remote-base URL] [--duckpgq-lock FILE --libduckdb-lock FILE]\n       retrieval-native fingerprint --config FILE [--duckpgq-lock FILE --libduckdb-lock FILE]\n       retrieval-native probe [--base-url http://127.0.0.1:8080] [--only resources] [--config FILE --marker FILE --token-file FILE --duckpgq-lock FILE --libduckdb-lock FILE]\n       retrieval-native schema --root DIR --config FILE --extensions DIR --prompt-file FILE [--duckpgq-lock FILE --libduckdb-lock FILE]\n       retrieval-native extract <manifest.json> <component.json> [limits]\n       retrieval-native extract-components <batch.json> [limits]\n       retrieval-native relationships <snapshot.json> <output.json> [budgets]\n       retrieval-native load <snapshot.json> <output.duckdb> --extensions DIR --libduckdb-sha256 HEX --duckpgq-version V --duckpgq-sha256 HEX [--libduckdb PATH] [budgets]\n       retrieval-native generation <manifest.json> <output.duckdb> (same engine options)"
+            eprintfn "usage: retrieval-native serve --root DIR --config FILE --token-file FILE --prompt-file FILE [--webhook-secret-file FILE] [--host H --port P]\n       retrieval-native index --root DIR --config FILE [--once] [--remote-base URL] [--duckpgq-lock FILE --libduckdb-lock FILE]\n       retrieval-native fingerprint --config FILE [--duckpgq-lock FILE --libduckdb-lock FILE]\n       retrieval-native probe [--base-url http://127.0.0.1:8080] [--only resources] [--config FILE --marker FILE --token-file FILE --duckpgq-lock FILE --libduckdb-lock FILE]\n       retrieval-native schema --root DIR --config FILE --prompt-file FILE [--duckpgq-lock FILE --libduckdb-lock FILE]\n       retrieval-native extract <manifest.json> <component.json> [limits]\n       retrieval-native extract-components <batch.json> [limits]\n       retrieval-native relationships <snapshot.json> <output.json> [budgets]\n       retrieval-native load <snapshot.json> <output.duckdb> [--libduckdb-lock FILE --duckpgq-lock FILE --libduckdb PATH] [budgets]\n       retrieval-native generation <manifest.json> <output.duckdb> (same engine options)"
             64
         else
             let argv = argv |> Array.collect (fun a -> if a = "--once" then [| "--once"; "true" |] else [| a |])
@@ -184,15 +191,7 @@ let main argv =
                       Only = (match args.Text("--only", null) with null -> None | only -> Some only) }
             | "schema" when positional.Length = 0 ->
                 // The published schema of one index root (upgrade.py validates the side index with it).
-                let lockPath name fallback = args.Text(name, Path.Combine(Path.GetDirectoryName(Environment.ProcessPath), fallback))
-                use duckpgq = JsonDocument.Parse(File.ReadAllBytes(lockPath "--duckpgq-lock" "duckpgq-lock.json"))
-                use libduckdb = JsonDocument.Parse(File.ReadAllBytes(lockPath "--libduckdb-lock" "libduckdb-lock.json"))
-                let here = Path.GetDirectoryName(Environment.ProcessPath)
-                let engine : Load.Engine =
-                    { Extensions = args.Required "--extensions"; LibDuckDb = args.Text("--libduckdb", Path.Combine(here, "libduckdb.so"))
-                      LibDuckDbSha256 = libduckdb.RootElement.GetProperty("libduckdb_so_sha256").GetString()
-                      DuckPgqVersion = duckpgq.RootElement.GetProperty("extension_version").GetString(); DuckPgqSha256 = duckpgq.RootElement.GetProperty("sha256").GetString()
-                      Threads = args.Int("--threads", 8); MemoryLimit = args.Text("--memory-limit", "768MB") }
+                let engine = { engine args with MemoryLimit = args.Text("--memory-limit", "768MB") }
                 let store = Query.ManagedStore(args.Required "--root", args.Required "--config", engine, args.Required "--prompt-file")
                 try Console.Out.WriteLine(toText orderedStyle (store.Schema())) finally store.Close()
                 0
@@ -202,12 +201,7 @@ let main argv =
                 use libduckdb = JsonDocument.Parse(File.ReadAllBytes(lockPath "--libduckdb-lock" "libduckdb-lock.json"))
                 if not (duckpgq.RootElement.GetProperty("accepted").GetBoolean()) || not (libduckdb.RootElement.GetProperty("accepted").GetBoolean()) then
                     raise (InvalidOperationException "Current DuckDB/DuckPGQ pair has not passed acceptance; deployment is disabled")
-                let here = Path.GetDirectoryName(Environment.ProcessPath)
-                let engine : Load.Engine =
-                    { Extensions = args.Required "--extensions"; LibDuckDb = args.Text("--libduckdb", Path.Combine(here, "libduckdb.so"))
-                      LibDuckDbSha256 = libduckdb.RootElement.GetProperty("libduckdb_so_sha256").GetString()
-                      DuckPgqVersion = duckpgq.RootElement.GetProperty("extension_version").GetString(); DuckPgqSha256 = duckpgq.RootElement.GetProperty("sha256").GetString()
-                      Threads = args.Int("--threads", 8); MemoryLimit = args.Text("--memory-limit", "768MB") }
+                let engine = { engine args with MemoryLimit = args.Text("--memory-limit", "768MB") }
                 let token = File.ReadAllText(args.Required "--token-file").Trim()
                 if token.Length < 32 then raise (InvalidOperationException "Retrieval API token must contain at least 32 characters")
                 let secret =
@@ -228,15 +222,10 @@ let main argv =
                 use libduckdb = JsonDocument.Parse(File.ReadAllBytes libduckdbLock)
                 if duckpgq.RootElement.GetProperty("accepted").GetBoolean() <> true || libduckdb.RootElement.GetProperty("accepted").GetBoolean() <> true then
                     raise (InvalidOperationException "Current DuckDB/DuckPGQ pair has not passed acceptance; deployment is disabled")
-                let here = Path.GetDirectoryName(Environment.ProcessPath)
-                let engine : Load.Engine =
-                    { Extensions = args.Required "--extensions"; LibDuckDb = args.Text("--libduckdb", Path.Combine(here, "libduckdb.so"))
-                      LibDuckDbSha256 = libduckdb.RootElement.GetProperty("libduckdb_so_sha256").GetString()
-                      DuckPgqVersion = duckpgq.RootElement.GetProperty("extension_version").GetString(); DuckPgqSha256 = duckpgq.RootElement.GetProperty("sha256").GetString()
-                      Threads = args.Int("--threads", 8); MemoryLimit = args.Text("--memory-limit", "2GB") }
+                let engine = { engine args with MemoryLimit = args.Text("--memory-limit", "2GB") }
                 let optionalFloat name = match args.Text(name, null) with null -> None | v -> Some(Double.Parse(v, Globalization.CultureInfo.InvariantCulture))
                 let options : Coordinator.Options =
-                    { Root = args.Required "--root"; Config = args.Required "--config"; Extensions = args.Required "--extensions"; Engine = engine
+                    { Root = args.Required "--root"; Config = args.Required "--config"; Engine = engine
                       Budgets = budgets args; ExtractLimits = extractLimits args; RemoteBase = args.Text("--remote-base", "https://forge.spkez.dev/")
                       LeaseSeconds = Double.Parse(args.Text("--lease-seconds", "900"), Globalization.CultureInfo.InvariantCulture)
                       SettleSeconds = optionalFloat "--settle-seconds"; MaxSettleSeconds = optionalFloat "--max-settle-seconds"

@@ -21,13 +21,12 @@ Publishing produces `native/publish/retrieval-native` for Linux x64, including
 the .NET runtime. It does not bundle model weights, provision a guest or start
 services.
 
-DuckDB.NET supplies bindings. Load the separate official engine artifact pinned
-by [`libduckdb-lock.json`](../config/libduckdb-lock.json) and its matching signed
-DuckPGQ extension pinned by [`duckpgq-lock.json`](../config/duckpgq-lock.json).
-Check both SHA-256 values before use. Keep the engine beside the published
-executable and the extension in its version/platform directory. The runtime
-verifies the pair; do not bypass signatures or substitute an engine based only
-on its filename.
+DuckDB.NET supplies bindings. The paired source build embeds DuckPGQ in the
+native library pinned by [`libduckdb-lock.json`](../config/libduckdb-lock.json).
+[`duckpgq-lock.json`](../config/duckpgq-lock.json) records its matching source.
+Keep `libduckdb.so` beside the executable. The runtime verifies its digest and
+source identity; it performs no runtime extension download. See the
+[native-engine contract](DUCKDB-2.md) for the reproducible build and acceptance.
 
 ## Configuration and startup
 
@@ -42,7 +41,6 @@ For the deployed layout, the indexer command is:
 /opt/retrieval/current/bundle/retrieval-native index \
   --root /var/lib/retrieval \
   --config /etc/retrieval/corpus.json \
-  --extensions /opt/retrieval/extensions \
   --duckpgq-lock /opt/retrieval/current/app/duckpgq-lock.json \
   --libduckdb-lock /opt/retrieval/current/app/libduckdb-lock.json
 ```
@@ -53,7 +51,6 @@ The API command is:
 /opt/retrieval/current/bundle/retrieval-native serve \
   --root /var/lib/retrieval \
   --config /etc/retrieval/corpus.json \
-  --extensions /opt/retrieval/extensions \
   --token-file /etc/retrieval/api.token \
   --webhook-secret-file /etc/retrieval/forgejo-webhook.secret \
   --prompt-file /opt/retrieval/current/app/PQL-PROMPT.md \
@@ -65,6 +62,13 @@ The API command is:
 Paths above are service-account inputs, not commands to run alongside an
 already active indexer. Its exclusive lock prevents a second publisher.
 `--once` is available for an explicitly controlled offline build.
+Existing lab units may still pass `--extensions`; it is ignored by the static
+engine path and is not a required input.
+
+The standalone `load` command is an offline snapshot import. It preserves the
+input's logical snapshot identity and records its engine binding within the
+metadata budget. Only `generation` through the coordinator constructs and
+publishes an engine-bound production generation.
 
 The [API document](ENGLISH-API.md) lists model environment variables. For the
 accepted Magnitude configuration, thinking is explicitly false and response

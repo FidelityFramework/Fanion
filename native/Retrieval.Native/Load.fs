@@ -1,6 +1,6 @@
 /// Snapshot validation and the DuckDB generation build: the same checks the
 /// Python loader enforced, then a columnar load into a fresh database with the
-/// pinned DuckDB 1.5.4 engine and the signed DuckPGQ extension loaded in-process.
+/// pinned DuckDB engine with DuckPGQ built into the same native library.
 module Retrieval.Native.Load
 
 open System
@@ -12,6 +12,7 @@ open System.Security.Cryptography
 open System.Text.Json
 open System.Text.RegularExpressions
 open DuckDB.NET.Data
+open DuckDB.NET.Native
 open Retrieval.Native.Snapshot
 open Retrieval.Native.Canonical
 
@@ -25,8 +26,14 @@ let private hex64 = Regex(@"\A[0-9a-f]{64}\z", RegexOptions.Compiled)
 let private hex40 = Regex(@"\A[0-9a-f]{40}\z", RegexOptions.Compiled)
 
 type Engine =
-    { Extensions: string; LibDuckDb: string; LibDuckDbSha256: string; DuckPgqVersion: string; DuckPgqSha256: string
+    { LibDuckDb: string; LibDuckDbSha256: string; DuckDbVersion: string; DuckDbSourceId: string; DuckPgqVersion: string
       Threads: int; MemoryLimit: string }
+
+/// One identity for the native artifact used to build and read a generation.
+let engineIdentity (engine: Engine) =
+    Obj [ "duckdb_version", Str engine.DuckDbVersion; "duckdb_source_id", Str engine.DuckDbSourceId
+          "libduckdb_sha256", Str engine.LibDuckDbSha256; "duckpgq_version", Str engine.DuckPgqVersion
+          "duckpgq_linkage", Str "static" ]
 
 type Limits = { MaxNodes: int; MaxEdges: int; MaxMetadataBytes: int }
 
@@ -140,7 +147,7 @@ let private sha256Of (path: string) =
     use stream = File.OpenRead path
     Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant()
 
-let mutable private resolverInstalled = false
+let mutable private resolvedArtifact : string option = None
 let private resolverLock = obj ()
 /// Point DuckDB.NET's P/Invoke at the pinned engine library instead of a bundled one.
 /// The resolver can be set once per process; callers on concurrent threads (parallel test
@@ -149,7 +156,11 @@ let installEngine (engine: Engine) =
     if not (File.Exists engine.LibDuckDb) then raise (LoadError("libduckdb is not installed: " + engine.LibDuckDb))
     if sha256Of engine.LibDuckDb <> engine.LibDuckDbSha256 then raise (LoadError "libduckdb checksum differs from the reviewed lock")
     lock resolverLock (fun () ->
-        if not resolverInstalled then
+        match resolvedArtifact with
+        | Some digest when digest <> engine.LibDuckDbSha256 ->
+            raise (LoadError "A different DuckDB artifact is already bound to this process")
+        | Some _ -> ()
+        | None ->
             let bindings =
                 typeof<DuckDBConnection>.Assembly.GetReferencedAssemblies()
                 |> Array.tryFind (fun a -> a.Name = "DuckDB.NET.Bindings")
@@ -157,42 +168,67 @@ let installEngine (engine: Engine) =
                 |> Option.defaultWith (fun () -> raise (LoadError "DuckDB.NET.Bindings assembly is not referenced"))
             NativeLibrary.SetDllImportResolver(bindings, fun name _ _ ->
                 if name.Contains("duckdb", StringComparison.OrdinalIgnoreCase) then NativeLibrary.Load(engine.LibDuckDb) else IntPtr.Zero)
-            resolverInstalled <- true)
+            resolvedArtifact <- Some engine.LibDuckDbSha256)
 
 let private scalar (connection: DuckDBConnection) (sql: string) : obj =
     use command = connection.CreateCommand()
     command.CommandText <- sql
     command.ExecuteScalar()
 
-let private execute (connection: DuckDBConnection) (sql: string) =
-    use command = connection.CreateCommand()
-    command.CommandText <- sql
-    command.ExecuteNonQuery() |> ignore
+let execute (connection: DuckDBConnection) (sql: string) =
+    // Extension DDL cannot go through the binding's implicit PREPARE path.
+    let mutable result = Unchecked.defaultof<DuckDBResult>
+    try
+        let state = NativeMethods.Query.DuckDBQuery(connection.NativeConnection, sql, &result)
+        if int state <> 0 then raise (LoadError(NativeMethods.Query.DuckDBResultError(&result)))
+    finally
+        NativeMethods.Query.DuckDBDestroyResult(&result)
 
 let private literal (value: string) = "'" + value.Replace("'", "''") + "'"
 
-/// Open a new database, pin settings, verify the engine and load the signed DuckPGQ build.
+/// Open a connection to the verified paired artifact; activate PGQ before parsing it.
 let openEngine (engine: Engine) (database: string) =
     installEngine engine
-    let connection = new DuckDBConnection("Data Source=" + database)
-    connection.Open()
-    let version = string (scalar connection "SELECT version()")
-    if version <> "v1.5.4" then raise (LoadError("DuckDB engine version differs from tested lock: " + version))
-    let platform = string (scalar connection "PRAGMA platform")
-    if platform <> "linux_amd64" then raise (LoadError "DuckPGQ binary has not been validated for this platform")
-    let binary = Path.Combine(engine.Extensions, "v1.5.4", platform, "duckpgq.duckdb_extension")
-    if not (File.Exists binary) || sha256Of binary <> engine.DuckPgqSha256 then raise (LoadError "DuckPGQ binary missing or checksum differs from tested lock")
-    execute connection ("SET extension_directory=" + literal engine.Extensions)
-    execute connection (sprintf "SET threads=%d" engine.Threads)
-    execute connection ("SET memory_limit=" + literal engine.MemoryLimit)
-    execute connection "LOAD duckpgq"
-    let loaded = string (scalar connection "SELECT extension_version FROM duckdb_extensions() WHERE extension_name='duckpgq'")
-    if loaded <> engine.DuckPgqVersion then raise (LoadError "DuckPGQ loaded version differs from tested lock")
-    connection
+    let settings = DuckDBConnectionStringBuilder()
+    settings.["Data Source"] <- database
+    settings.["autoinstall_known_extensions"] <- "false"
+    settings.["autoload_known_extensions"] <- "false"
+    let connection = new DuckDBConnection(settings.ConnectionString)
+    try
+        connection.Open()
+        let version = string (scalar connection "SELECT version()")
+        let source = string (scalar connection "SELECT source_id FROM pragma_version()")
+        if version <> engine.DuckDbVersion || source <> engine.DuckDbSourceId then
+            raise (LoadError "DuckDB version or source differs from the reviewed lock")
+        if string (scalar connection "PRAGMA platform") <> "linux_amd64" then
+            raise (LoadError "DuckPGQ artifact has not been validated for this platform")
+        let builtin = string (scalar connection "SELECT install_path FROM duckdb_extensions() WHERE extension_name='duckpgq' AND loaded")
+        if builtin <> "(BUILT-IN)" then raise (LoadError "DuckPGQ must be built into the verified library")
+        let loaded = string (scalar connection "SELECT extension_version FROM duckdb_extensions() WHERE extension_name='duckpgq'")
+        if loaded <> engine.DuckPgqVersion then raise (LoadError "DuckPGQ version differs from the reviewed lock")
+        execute connection (sprintf "SET threads=%d" engine.Threads)
+        execute connection ("SET memory_limit=" + literal engine.MemoryLimit)
+        execute connection "SET active_grammar_extensions=['duckpgq']"
+        connection
+    with _ ->
+        connection.Dispose()
+        reraise ()
+
+let verifyGenerationEngine (engine: Engine) (metadata: JsonElement) =
+    match metadata.TryGetProperty("engine") with
+    | true, recorded when toText canonicalStyle (Raw recorded) = toText canonicalStyle (engineIdentity engine) -> ()
+    | _ -> raise (LoadError "Generation engine identity differs from the reviewed lock")
 
 /// Build the generation: metadata table, nodes, edges, property graph, in one transaction.
 let build (engine: Engine) (database: string) (metadataText: string) (nodes: NodeRow seq) (edges: EdgeRow seq) =
     if File.Exists database then raise (LoadError "Build a new database generation; do not overwrite a live snapshot")
+    use metadata = JsonDocument.Parse metadataText
+    if (match metadata.RootElement.TryGetProperty("engine") with true, _ -> true | _ -> false) then
+        verifyGenerationEngine engine metadata.RootElement
+    let binding = engineIdentity engine
+    let metadataText =
+        let pairs = [ for p in metadata.RootElement.EnumerateObject() do if p.Name <> "engine" then yield p.Name, Raw p.Value ]
+        toText defaultStyle (Obj(pairs @ [ "engine", binding ]))
     let connection = openEngine engine database
     try
         try

@@ -9,7 +9,7 @@ belong with each result.
 The native suite covers source extraction, policy, deterministic identity,
 query constraints, model transport, coordinator recovery, HTTP authentication,
 webhooks, freshness and request lifetimes. Engine-backed cases need the pinned
-DuckDB library and signed extension.
+DuckDB library with built-in DuckPGQ.
 
 From this checkout, with artifacts under `.scratch/engine/`:
 
@@ -66,10 +66,44 @@ This bounded check establishes those graph operations. Broader research
 questions can require two model completions and still need their own semantic
 acceptance cases. Grammar-valid JSON alone does not establish relevance.
 
-The extracted Fanion checkout passed 134 native tests, with two retained
-external-validator skips, and 11 hook-reconciler tests. The lab packaging and
-rollout suite passed 73 tests; its hook installer passed 19. Publishing and
-packaging from the new checkout also passed, with the deployed artifact names
-preserved. The deployed no-thinking profile separately passed
-12/12 graph-correct responses without observed reasoning. Retain those scopes
-when reporting results.
+The paired 2.0 implementation passed 139 native tests, with two retained
+external-validator skips. Removing grammar activation, engine source checking,
+generation binding, renamed-target verification or the active-file lock guard
+each failed its intended test;
+the restored full suite passed. The lab packaging and rollback suite passed
+76 tests. The unchanged hook reconciler retains its 11-test accepted baseline.
+The deployed no-thinking profile separately passed 12/12 graph-correct responses
+without observed reasoning. Local engine acceptance and live deployment are
+distinct gates.
+
+## Context carried into the agent
+
+For the outgoing-links question above, a separate measured HTTPS request returned
+five oracle-checked relationships in 1.138 seconds and 8,162 UTF-8 bytes at
+14:26 UTC on October 20. The request specified a 4,000-character excerpt budget. Those
+relationships identify four linked files across two repositories and a repository
+resource. Source hydration used 3,000 characters and explicitly omitted one
+target's excerpt; all five relationship rows were returned.
+
+A controlled eager full-file reading policy over the seed and those four targets
+read 4,128 lines and 292,614 bytes at the same published commits. The bounded
+answer was about 36 times smaller. The raw Git I/O took 0.010 seconds, excluding
+any agent inference. This establishes a context-volume comparison, not a 36-fold
+agent speedup. Within those five files, the seed filename had zero literal
+matches and “nanopass” had 45 matching lines. Following recorded relationships
+answers a different question from matching words.
+
+A bounded agent-loop replay on ONE used the same resident Qwen3.5-4b Q5 model with two
+tool policies. Raw reading selected six search/read calls in each of two trials
+(2.46–3.56 seconds, 12,959 tool-result bytes). The graph policy selected one or
+two calls (2.60–3.53 seconds, 7,830–15,660 bytes including a repeated retrieval).
+All final responses violated the requested object schema. The first graph
+response contained all five correct resource tuples as an array; the second
+omitted repository identities. The raw responses failed to normalize the
+cross-repository link and omitted the repository resource. This is useful
+diagnostic evidence for discovery steps, but it does not establish accepted
+agent answer quality or a wall-clock speedup. The raw fixture was only the five
+graph-located files, not a crawl of all configured repositories.
+
+The [DuckDB 2.0 contract](DUCKDB-2.md) records the engine measurements and
+their acceptance boundaries. Current production engine locks remain authoritative.

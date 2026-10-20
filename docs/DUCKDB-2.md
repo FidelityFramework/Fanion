@@ -1,0 +1,127 @@
+# DuckDB 2.0 native engine
+
+Fanion targets the paired source build recorded in its engine locks: DuckDB
+`v2.0.0-dev1`, source `45f4fdf315`, with built-in DuckPGQ `6b1d4b021d`.
+This is a pinned development build, not the final 2.0.0 release. The live service
+continues on its accepted engine until supervised deployment passes.
+
+## Build and connection contract
+
+The [library lock](../config/libduckdb-lock.json) binds the complete native
+artifact by SHA-256. The [DuckPGQ lock](../config/duckpgq-lock.json) records the
+matching extension source. Build DuckPGQ at
+`6b1d4b021daefb8b4e906b58def263f99158effb`, with its DuckDB submodule at
+`45f4fdf3153c89cd38fdf6fb20b95646a466c5ac` and extension-ci-tools at
+`39ffc46ca8c70021d741c7be2e7bcadf3fd1c503`.
+
+In the upstream primary source checkout:
+
+```bash
+git submodule update --init --recursive
+CMAKE_BUILD_PARALLEL_LEVEL=6 CC=clang CXX=clang++ \
+  make release GEN=ninja \
+  'EXT_RELEASE_FLAGS=-DBUILD_UNITTESTS=ON -DDISABLE_UNITY=ON -DSTATICALLY_LINK_EXTENSIONS="core_functions;json;parquet;icu;duckpgq"'
+```
+
+The artifact is `build/release/src/libduckdb.so`. Its accepted identity is the
+lock digest, not a filename. Rebuilding with another toolchain can produce a
+new digest and requires its own acceptance. Keep all ordinary core extensions
+in the static list; linking only DuckPGQ leaves basic functions unavailable.
+
+`Load.openEngine` owns every production connection. It verifies the artifact,
+process binding, runtime version/source, platform, built-in linkage and extension
+version. Automatic extension installation and loading are disabled. It then
+executes this separately, before any PGQ statement is parsed:
+
+```sql
+SET active_grammar_extensions = ['duckpgq'];
+```
+
+DuckDB.NET.Data/Bindings 1.5.3 remain the host adapter. Extension DDL uses the
+existing native `DuckDBQuery` API with result destruction in `finally` because
+implicit preparation is unsupported for this graph-creation path. Validated
+graph reads retain the normal binding. The gateway regenerates SQL from its
+restricted grammar and validated seed/edge parameters.
+
+The service uses read-write connections and unqualified `GRAPH_TABLE(corpus, …)`.
+Read-only graph queries and references qualified with a renamed catalog are
+outside this accepted contract. These limitations do not require a second
+connection pool or a new connector.
+
+## Generation and rollback
+
+`Generation` includes the native engine identity in the canonical generation
+body before hashing it. `Coordinator` verifies the staged graph and its final
+filename, then asks `IndexState` to publish through its existing lease/epoch
+fence. An already active target retains its prior verification: the serving
+process holds its read-write lock, and `Query.Store` checks the engine identity
+when opening it. Other pre-existing targets must pass verification. There is
+one publication authority.
+
+Deployment builds the complete candidate corpus alongside the serving database.
+The updater retains the previous executable, engine, generation and coordinator
+state together. It stops and switches only after candidate validation, and
+restores that coherent set if activation fails. Never open a new-format database
+with the old engine as a rollback strategy.
+
+The native suite covers independently activated connections, changed artifacts,
+version/source/extension mismatches, generation binding and publication. Removing
+grammar activation, source checking, generation checking or target verification
+causes the respective discriminating test to fail. A separate-process test
+holds the active graph open while unchanged-revision invalidation resolves.
+The final static build passed 4,944 upstream SQL
+assertions in 73 cases. Live acceptance is separate from these local gates.
+
+A refused inactive target remains unpublished. Stop the indexer, retain its
+`last-build.json` failure receipt and move only that rejected inactive file out
+of `generations/` into private quarantine before resuming reconciliation.
+Check the active-generation identity first; never move a serving generation.
+
+## Indexing and cross-linking measurements
+
+`Enrich` remains the authority for relationship semantics. An engine-side staging
+prototype reproduced all 4,685 module-open relationships on 23 pinned repositories
+when comparing endpoints, evidence line and rule. Other rule families and full
+provenance-record parity were outside that prototype. It is not a replacement
+for the production relationship pass.
+
+With the full production node/edge layout—16,273 nodes and 29,458 edges—three
+trials gave these medians in milliseconds. Both engines used the same direct-DDL
+measurement host; the 2.0 measurements here used the earlier dynamic paired build,
+whose distinct artifact hashes are retained in the receipt.
+
+| Engine | Appenders | Load | Graph construction | Explicit checkpoint |
+| --- | ---: | ---: | ---: | ---: |
+| 1.5.4 | 1 | 230 | 118 | 10 |
+| 1.5.4 | 4 | 172 | 108 | 11 |
+| 1.5.4 | 8 | 200 | 109 | 11 |
+| 2.0 paired source | 1 | 281 | 315 | 3 |
+| 2.0 paired source | 4 | 175 | 343 | 3 |
+| 2.0 paired source | 8 | 186 | 362 | 4 |
+
+Outgoing, incoming and chunk queries matched edge-table oracles, including after
+reopening. Four appenders helped loading; eight gave no consistent further gain.
+Graph construction was slower in this candidate. These results support source
+compatibility, not a general 2.0 speed claim. The unchanged extractor separately
+scaled from 6.142 seconds at one processor to 1.902 at four and 1.564 at eight.
+
+The final static artifact was separately checked through the production
+`Load.openEngine` boundary. At one/four/eight appenders, load medians were
+311/245/249 ms and graph construction 326/352/378 ms; explicit checkpoints were
+about 3 ms. Those loads include each appender connection's artifact checks.
+All three graph query families matched their oracles before and after reopening.
+
+A SQL join for module-open matching took 4–9 ms versus about 21 ms for the F#
+matcher with already parsed facts. Appending the facts adds work, so these figures
+do not establish faster complete cross-linking. Any owning-rule migration must
+preserve complete edge provenance, precedence, ordinal identity and publication.
+
+[Quack](https://duckdb.org/docs/preview/connect/concurrency) provides a separate
+multiprocess client facility. Four F#/.NET clients wrote and read 40,000 distinct
+rows through authenticated loopback in a preview smoke test using an attached
+remote catalog. This does not establish production durability or LAN throughput.
+The embedded generation pipeline needs no network database service.
+
+The [numeric receipt](measurements/2026-10-20.json) records source revisions,
+artifact hashes, scopes and trial measurements. See [Validation](VALIDATION.md)
+for complete text-to-JSON and context-volume evidence.

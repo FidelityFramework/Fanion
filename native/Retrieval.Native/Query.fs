@@ -150,6 +150,9 @@ type Store(database: string, engine: Load.Engine, promptFile: string) =
     let queryThreads = Convert.ToInt64(scalar "SELECT current_setting('threads')")
     let metadataText = string (scalar "SELECT value FROM metadata")
     let metadata = JsonDocument.Parse(metadataText).RootElement
+    do
+        try Load.verifyGenerationEngine engine metadata
+        with _ -> connection.Dispose(); reraise ()
     let repositories = [ for r in metadata.GetProperty("repositories").EnumerateArray() -> r ]
     let policies = [ for r in repositories -> r.GetProperty("name").GetString(), Policy.normalize (match r.TryGetProperty("policy") with | true, p when p.ValueKind = JsonValueKind.Object -> Some p | true, _ -> raise (QueryError "Repository policy must be an object") | _ -> None) ]
     let edgeColumns = (use c = connection.CreateCommand() in c.CommandText <- "DESCRIBE edges"; use r = c.ExecuteReader() in [ while r.Read() do yield string (r.GetValue 0) ]) |> set

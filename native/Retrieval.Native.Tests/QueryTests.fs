@@ -31,8 +31,8 @@ let testEngine () : Retrieval.Native.Load.Engine option =
     | extensions, libduckdb ->
         let lock name = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(sourceRoot, "config", name))).RootElement
         let duckpgq, lib = lock "duckpgq-lock.json", lock "libduckdb-lock.json"
-        Some { Extensions = extensions; LibDuckDb = libduckdb; LibDuckDbSha256 = lib.GetProperty("libduckdb_so_sha256").GetString()
-               DuckPgqVersion = duckpgq.GetProperty("extension_version").GetString(); DuckPgqSha256 = duckpgq.GetProperty("sha256").GetString()
+        Some { LibDuckDb = libduckdb; LibDuckDbSha256 = lib.GetProperty("libduckdb_so_sha256").GetString(); DuckDbVersion = lib.GetProperty("duckdb_version").GetString(); DuckDbSourceId = lib.GetProperty("duckdb_source_id").GetString()
+               DuckPgqVersion = duckpgq.GetProperty("extension_version").GetString()
                Threads = duckdbThreads; MemoryLimit = "768MB" }
 
 /// Skip (xunit dynamic skip) unless the verified engine is configured for this run.
@@ -263,12 +263,13 @@ let ``real pgq returns inferred edge provenance and capability seeds`` () =
     Assert.Equal(Null, get structural "evidence_id")
 
 [<Fact>]
-let ``old published database remains queryable without provenance columns`` () =
+let ``structural graph without provenance columns retains its engine binding`` () =
     use g = new Graph(requireEngine ())
     let database = Path.Combine(g.Root, "legacy.duckdb")
     let nodeFieldsWithText = nodeFields @ [ "text" ]
-    let execute (connection: DuckDBConnection) (sql: string) = (use c = connection.CreateCommand() in c.CommandText <- sql; c.ExecuteNonQuery() |> ignore)
-    let metadata = Obj [ for (k, v) in (match g.Data with Obj pairs -> pairs | _ -> []) do if k <> "nodes" && k <> "edges" then yield k, v ]
+    let execute (connection: DuckDBConnection) (sql: string) = Retrieval.Native.Load.execute connection sql
+    let metadata = Obj [ yield "engine", Retrieval.Native.Load.engineIdentity g.Engine
+                         for (k, v) in (match g.Data with Obj pairs -> pairs | _ -> []) do if k <> "nodes" && k <> "edges" then yield k, v ]
     let value (node: J) (name: string) = match get node name with Str s -> sqlLiteral s | Int i -> string i | _ -> "NULL"
     begin
         let connection = Retrieval.Native.Load.openEngine g.Engine database
@@ -420,3 +421,59 @@ let ``hop limits are respected`` () =
     for (bounds, expected) in [ "{1,1}", [ g.Ids.[1] ]; "{1,2}", [ g.Ids.[1]; g.Ids.[2] ] ] do
         Assert.Equal<string list>(expected, ids (g.Pgq(examples.[2].Replace("{1,3}", bounds), g.Ids.[0], None)))
     queryError (fun () -> g.Pgq(examples.[2].Replace("{1,3}", "{2,2}"), g.Ids.[0], None) |> ignore) |> ignore
+
+[<Fact>]
+let ``native connections activate grammar independently without installation`` () =
+    use g = new Graph(requireEngine ())
+    let _, snapshot = g.Load(g.Data, "connection-matrix")
+    let path = Path.Combine(g.Root, "connection-matrix.duckdb")
+    use first = Retrieval.Native.Load.openEngine g.Engine path
+    use peer = new DuckDBConnection("Data Source=" + path)
+    peer.Open()
+    let query = compilePgq examples.[0] (pgqParameters (Str g.Ids.[0]) None) 25L 0L None
+    let read (c: DuckDBConnection) =
+        use command = c.CreateCommand()
+        command.CommandText <- query
+        use rows = command.ExecuteReader()
+        let mutable count = 0
+        while rows.Read() do count <- count + 1
+        count
+    Assert.Equal(1, read first)
+    let rejected = Assert.ThrowsAny<Exception>(fun () -> read peer |> ignore)
+    Assert.Contains("Parser Error", rejected.Message)
+    use second = Retrieval.Native.Load.openEngine g.Engine path
+    Assert.Equal(1, read second)
+    for setting in [ "autoinstall_known_extensions"; "autoload_known_extensions"; "allow_unsigned_extensions" ] do
+        use command = second.CreateCommand()
+        command.CommandText <- sprintf "SELECT current_setting('%s')" setting
+        Assert.False(Convert.ToBoolean(command.ExecuteScalar()))
+    Assert.NotEmpty(snapshot)
+
+[<Fact>]
+let ``native artifact source and extension identity mismatches are refused`` () =
+    use g = new Graph(requireEngine ())
+    let path = Path.Combine(g.Root, "wrong-engine.duckdb")
+    let rejected expected engine =
+        let message = loadError(fun () -> use connection = Retrieval.Native.Load.openEngine engine path in ())
+        Assert.Contains(expected, message)
+    rejected "checksum" { g.Engine with LibDuckDbSha256 = rev '0' 64 }
+    rejected "version or source" { g.Engine with DuckDbSourceId = "wrong-source" }
+    rejected "version or source" { g.Engine with DuckDbVersion = "wrong-version" }
+    rejected "DuckPGQ version" { g.Engine with DuckPgqVersion = "wrong-extension" }
+    let alternate = Path.Combine(g.Root, "different-artifact.so")
+    File.WriteAllText(alternate, "different artifact with a matching lock digest")
+    let digest = Convert.ToHexString(Security.Cryptography.SHA256.HashData(File.ReadAllBytes alternate)).ToLowerInvariant()
+    rejected "already bound" { g.Engine with LibDuckDb = alternate; LibDuckDbSha256 = digest }
+
+[<Fact>]
+let ``published graph from another engine cannot be opened`` () =
+    use g = new Graph(requireEngine ())
+    let _, snapshot = g.Load(g.Data, "wrong-generation-engine")
+    let path = Path.Combine(g.Root, "wrong-generation-engine.duckdb")
+    do
+        use connection = Retrieval.Native.Load.openEngine g.Engine path
+        Retrieval.Native.Load.execute connection
+            "UPDATE metadata SET value=json_merge_patch(value, '{\"engine\":{\"libduckdb_sha256\":\"wrong-artifact\"}}')"
+    let message = loadError(fun () -> let store = Store(path, g.Engine, promptFile) in store.Close())
+    Assert.Contains("Generation engine identity differs", message)
+    Assert.NotEmpty(snapshot)

@@ -83,6 +83,7 @@ and release activation.
 | [Webhooks](docs/WEBHOOKS.md) | Push authentication, enrollment, reconciliation, publication and recovery |
 | [Operations](docs/OPERATIONS.md) | Build, engine pins, service configuration and deployment |
 | [Validation](docs/VALIDATION.md) | Test commands, correctness controls and measured full response times |
+| [DuckDB 2.0](docs/DUCKDB-2.md) | Paired native build, connection contract, publication and measured indexing |
 | [Query prompt](docs/PQL-PROMPT.md) | Supported graph language and worked examples |
 
 The runtime and indexing receiver are here. The lab repository owns VM

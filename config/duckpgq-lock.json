@@ -1,11 +1,11 @@
 {
-  "duckdb_version": "1.5.4",
+  "duckdb_version": "v2.0.0-dev1",
   "platform": "linux_amd64",
-  "extension_version": "f386a6c",
-  "sha256": "327cd944fee87b6a7595dd5f186016396129a788c9613b23dd26176561364000",
+  "extension_version": "6b1d4b021d",
+  "source_revision": "6b1d4b021daefb8b4e906b58def263f99158effb",
+  "duckdb_source_revision": "45f4fdf3153c89cd38fdf6fb20b95646a466c5ac",
+  "linkage": "static",
   "accepted": true,
-  "repository": "https://community-extensions.duckdb.org",
-  "checked_at": "2026-09-23",
-  "review_after": "2026-10-23",
-  "notes": "Official PyPI DuckDB1.5.4 with signed community DuckPGQf386a6c passes actual graph/persistence/security tests. Newest stable1.5.5 has no published package and direct source builds hit parser incompatibilities. Choose the tested maintained1.5pair over an alpha runtime or custom parser port; review on new published compatible artifacts. Incoming quantified shortest paths are unsupported. No1.4deployment."
+  "checked_at": "2026-10-20",
+  "notes": "DuckPGQ is built into the exact libduckdb artifact in libduckdb-lock.json. Every connection activates its grammar independently before parsing PGQ."
 }

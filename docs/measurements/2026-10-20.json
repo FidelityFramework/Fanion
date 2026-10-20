@@ -1,0 +1,1467 @@
+{
+  "date": "2026-10-20",
+  "snapshot_id": "7f77abc7662170936bd639dda50a09733015f5d07ed23581e7594438b8759576",
+  "fanion_base": "b4d23373d8e05ff31eb867f9094d5dec92cacf26",
+  "hardware": "Z13 Ryzen AI MAX\u002B 395, Linux x86-64; .NET 10; DuckDB.NET.Bindings/Data 1.5.3. Local isolated engine tests; services remained running.",
+  "preview_source": "2ec7e8401c",
+  "preview_library_sha256": "8831a1ec34bc5b4b9b1ca45fdac83f04e650f07cb2510f5034c1d0e4f6cb24cf",
+  "source_duckpgq": "6b1d4b021daefb8b4e906b58def263f99158effb",
+  "source_duckdb": "45f4fdf3153c89cd38fdf6fb20b95646a466c5ac",
+  "source_library_sha256": "99a1e65a2c3905a9bb281eb9f560c7615dab3e2e106bd68913cb8dd49d8d7fcb",
+  "source_extension_sha256": "394958d1fd48cee3f98043d22a66a5279054ff75853c763bee25e312984a67d9",
+  "production_changed": false,
+  "static_candidate": {
+    "scope": "Implementation candidate; local acceptance before supervised deployment. Earlier dynamic source-build and official preview measurements below remain separate artifacts.",
+    "library_sha256": "c511d4f96f5f8253d63bc864560e7e498261866a30e995025a175b2d445df59d",
+    "native_binary_sha256": "60b635898e9fba148d04b2568ca903f015035a2f2f3867a9c336b8b74af7c611",
+    "graph": {
+      "edges": 29458,
+      "libduckdb_sha256": "c511d4f96f5f8253d63bc864560e7e498261866a30e995025a175b2d445df59d",
+      "native_relationships_s": 0.7375454,
+      "nodes": 16273,
+      "repositories": 23,
+      "scope": "23 pinned repositories, final static artifact, production openEngine and C API DDL; full node/edge columns and existing F# enrichment; isolated database, full source row appenders, PGQ parity and reopen; no publication or production deployment",
+      "source": "45f4fdf315",
+      "trials": [
+        {
+          "checkpoint_s": 0.0039361,
+          "graph_creation_s": 0.3251153,
+          "load_s": 0.3111672,
+          "queries": [
+            {
+              "name": "outgoing",
+              "parity": true,
+              "rows": 5,
+              "seconds": 0.0220174
+            },
+            {
+              "name": "incoming",
+              "parity": true,
+              "rows": 8,
+              "seconds": 0.0053709
+            },
+            {
+              "name": "chunks",
+              "parity": true,
+              "rows": 2,
+              "seconds": 0.0037815
+            }
+          ],
+          "reopen_parity": true,
+          "repeat": 1,
+          "version": "v2.0.0-dev1",
+          "workers": 1
+        },
+        {
+          "checkpoint_s": 0.002949,
+          "graph_creation_s": 0.3351915,
+          "load_s": 0.3291049,
+          "queries": [
+            {
+              "name": "outgoing",
+              "parity": true,
+              "rows": 5,
+              "seconds": 0.0045125
+            },
+            {
+              "name": "incoming",
+              "parity": true,
+              "rows": 8,
+              "seconds": 0.0034842
+            },
+            {
+              "name": "chunks",
+              "parity": true,
+              "rows": 2,
+              "seconds": 0.0033325
+            }
+          ],
+          "reopen_parity": true,
+          "repeat": 2,
+          "version": "v2.0.0-dev1",
+          "workers": 1
+        },
+        {
+          "checkpoint_s": 0.0027893,
+          "graph_creation_s": 0.3263562,
+          "load_s": 0.2803762,
+          "queries": [
+            {
+              "name": "outgoing",
+              "parity": true,
+              "rows": 5,
+              "seconds": 0.0049893
+            },
+            {
+              "name": "incoming",
+              "parity": true,
+              "rows": 8,
+              "seconds": 0.0037675
+            },
+            {
+              "name": "chunks",
+              "parity": true,
+              "rows": 2,
+              "seconds": 0.0033997
+            }
+          ],
+          "reopen_parity": true,
+          "repeat": 3,
+          "version": "v2.0.0-dev1",
+          "workers": 1
+        },
+        {
+          "checkpoint_s": 0.0029595,
+          "graph_creation_s": 0.3515171,
+          "load_s": 0.2511147,
+          "queries": [
+            {
+              "name": "outgoing",
+              "parity": true,
+              "rows": 5,
+              "seconds": 0.0044603
+            },
+            {
+              "name": "incoming",
+              "parity": true,
+              "rows": 8,
+              "seconds": 0.0043243
+            },
+            {
+              "name": "chunks",
+              "parity": true,
+              "rows": 2,
+              "seconds": 0.0034394
+            }
+          ],
+          "reopen_parity": true,
+          "repeat": 1,
+          "version": "v2.0.0-dev1",
+          "workers": 4
+        },
+        {
+          "checkpoint_s": 0.0027656,
+          "graph_creation_s": 0.3439887,
+          "load_s": 0.2374741,
+          "queries": [
+            {
+              "name": "outgoing",
+              "parity": true,
+              "rows": 5,
+              "seconds": 0.0044341
+            },
+            {
+              "name": "incoming",
+              "parity": true,
+              "rows": 8,
+              "seconds": 0.0047466
+            },
+            {
+              "name": "chunks",
+              "parity": true,
+              "rows": 2,
+              "seconds": 0.0035676
+            }
+          ],
+          "reopen_parity": true,
+          "repeat": 2,
+          "version": "v2.0.0-dev1",
+          "workers": 4
+        },
+        {
+          "checkpoint_s": 0.0036067,
+          "graph_creation_s": 0.3569639,
+          "load_s": 0.2453463,
+          "queries": [
+            {
+              "name": "outgoing",
+              "parity": true,
+              "rows": 5,
+              "seconds": 0.0042471
+            },
+            {
+              "name": "incoming",
+              "parity": true,
+              "rows": 8,
+              "seconds": 0.0035088
+            },
+            {
+              "name": "chunks",
+              "parity": true,
+              "rows": 2,
+              "seconds": 0.0033141
+            }
+          ],
+          "reopen_parity": true,
+          "repeat": 3,
+          "version": "v2.0.0-dev1",
+          "workers": 4
+        },
+        {
+          "checkpoint_s": 0.0027096,
+          "graph_creation_s": 0.3781743,
+          "load_s": 0.2476811,
+          "queries": [
+            {
+              "name": "outgoing",
+              "parity": true,
+              "rows": 5,
+              "seconds": 0.0042857
+            },
+            {
+              "name": "incoming",
+              "parity": true,
+              "rows": 8,
+              "seconds": 0.0035591
+            },
+            {
+              "name": "chunks",
+              "parity": true,
+              "rows": 2,
+              "seconds": 0.0032811
+            }
+          ],
+          "reopen_parity": true,
+          "repeat": 1,
+          "version": "v2.0.0-dev1",
+          "workers": 8
+        },
+        {
+          "checkpoint_s": 0.0031386,
+          "graph_creation_s": 0.3754427,
+          "load_s": 0.2485304,
+          "queries": [
+            {
+              "name": "outgoing",
+              "parity": true,
+              "rows": 5,
+              "seconds": 0.0044614
+            },
+            {
+              "name": "incoming",
+              "parity": true,
+              "rows": 8,
+              "seconds": 0.0036816
+            },
+            {
+              "name": "chunks",
+              "parity": true,
+              "rows": 2,
+              "seconds": 0.0032133
+            }
+          ],
+          "reopen_parity": true,
+          "repeat": 2,
+          "version": "v2.0.0-dev1",
+          "workers": 8
+        },
+        {
+          "checkpoint_s": 0.0028702,
+          "graph_creation_s": 0.379415,
+          "load_s": 0.2487081,
+          "queries": [
+            {
+              "name": "outgoing",
+              "parity": true,
+              "rows": 5,
+              "seconds": 0.0044954
+            },
+            {
+              "name": "incoming",
+              "parity": true,
+              "rows": 8,
+              "seconds": 0.003995
+            },
+            {
+              "name": "chunks",
+              "parity": true,
+              "rows": 2,
+              "seconds": 0.0039212
+            }
+          ],
+          "reopen_parity": true,
+          "repeat": 3,
+          "version": "v2.0.0-dev1",
+          "workers": 8
+        }
+      ]
+    },
+    "upstream_sql_log_sha256": "a2c6923a44eb53d1eceea940c0c9278d2b35b10d319c2f32520e4343e5fc9c36",
+    "native_suite": "141 total, 139 passed, 2 retained optional native-validator skips, zero failures. Five discriminating mutations each failed intended fact; restored full suite passed.",
+    "native_suite_log_sha256": "b4bb1901df65acd12410421c858bd985cf0cd18716ad455a8a77912a677e487f",
+    "package_suite": "76 passed, including changed artifact, mismatched static pair, rollback artifacts and rollback source refusals.",
+    "lan_roles": "ONE connection delta, TWO publication delta, THREE deployment delta: scoped advisory reads. Z13 native source build, integration and leased acceptance. Opus5.5 sole auditor."
+  },
+  "input_repositories": [
+    {
+      "repo": "FidelityFramework/clef",
+      "commit": "09cab055fda0d82612388146c42c864ed1e71ca0"
+    },
+    {
+      "repo": "FidelityFramework/Composer",
+      "commit": "ee0e581706549ac1881b0dfd8015cb9221312dea"
+    },
+    {
+      "repo": "FidelityFramework/Fidelity.PSG",
+      "commit": "393a48c1ef29a862a43520a197296a9583fdc92d"
+    },
+    {
+      "repo": "FidelityFramework/Alex",
+      "commit": "7ae1535d4d3526145d0cf1870d1ceba090f9e9e1"
+    },
+    {
+      "repo": "FidelityFramework/Fidelity.FSharp.Incremental",
+      "commit": "d476aea234b70a6e4770153c77b6ad4a7fbde568"
+    },
+    {
+      "repo": "FidelityFramework/Bozzetto",
+      "commit": "b15c3014dd3cfe120628419fce2d5960e4ef9485"
+    },
+    {
+      "repo": "FidelityFramework/Calque",
+      "commit": "d0f614329aa6b54eb54a9d9b080fc8fd9f23e794"
+    },
+    {
+      "repo": "FidelityFramework/clef-lang-spec",
+      "commit": "684a79ca8727a605e66e12299f407f7a7b0e047a"
+    },
+    {
+      "repo": "FidelityFramework/clef-lang-site",
+      "commit": "170693b2aa26b6f34baeaaaebbbc6ec3fee7969f"
+    },
+    {
+      "repo": "FidelityFramework/Fidelity.Platform",
+      "commit": "8452124a5af4fb0d5d289d6f16ab47d23a07ed10"
+    },
+    {
+      "repo": "FidelityFramework/Farscape",
+      "commit": "23edcf0792fd80a91f000d60ec6ddd5e554bbb89"
+    },
+    {
+      "repo": "FidelityFramework/Fidelity.UI",
+      "commit": "a1c280bbc78fbcee121cb2cc548a77bd1d747549"
+    },
+    {
+      "repo": "FidelityFramework/WrenHello",
+      "commit": "cd6f307cb8f06716fd89c55fd48ce40bf4ac7b70"
+    },
+    {
+      "repo": "FidelityFramework/HelloWayland",
+      "commit": "adc4cf6bde11de60e2c9f78f752966e6a5c08248"
+    },
+    {
+      "repo": "FidelityFramework/Fidelity.WebKit",
+      "commit": "b274f13ecec29a0ca0ea34bba044c6ad17aa218f"
+    },
+    {
+      "repo": "FidelityFramework/Fidelity.Gtk3",
+      "commit": "5cc6d1df061c4e3b1e0bf74eaa28a563d3f97ef2"
+    },
+    {
+      "repo": "FidelityFramework/Fidelity.GObject",
+      "commit": "541f580a3eb28d7ed785a4abf71ac21e78ced1f6"
+    },
+    {
+      "repo": "FidelityFramework/clef-grammar",
+      "commit": "f59fe12352ad2732ab5100481a6229f47ee9eef7"
+    },
+    {
+      "repo": "FidelityFramework/lattice-vscode",
+      "commit": "3ddea312b9b53d95929797883c610725b87588fd"
+    },
+    {
+      "repo": "FidelityFramework/lattice-vim",
+      "commit": "06450f0c651e79c6fb1680864f85d4c35c075e6b"
+    },
+    {
+      "repo": "FidelityFramework/lattice-analyzers",
+      "commit": "b987570fc717dadae9439b14ffa5f92c3afcbeb2"
+    },
+    {
+      "repo": "FidelityFramework/ClefAutoComplete",
+      "commit": "2bdce35d0300077577e7ed27ff472eb5a1b5b402"
+    },
+    {
+      "repo": "FidelityFramework/BAREWire",
+      "commit": "7c3951a042bb0af894da6b6e89fb62c0fd27d9d8"
+    }
+  ],
+  "extract_manifest_sha256": "2a5a343d669b933caeac401737a1a1c212808f1d5a1f459639faaac3d9a4cde8",
+  "upstream_sql_tests": "4944 assertions in 73 cases, includes 228 assertions in five grammar cases; both suites unfiltered within their declared upstream paths.",
+  "upstream_sql_log_sha256": "ce015f5d3c7aeaafe1603ccd5310824b4686d90121647576396b67b28b3e847a",
+  "renamed_readwrite": "Unqualified graph returned one row; graph qualified with new catalog name failed: Property graph does not exist.",
+  "incremental_checkpoint": "a6d6afb42e9de8bc28c54406eaf0482859769e5a",
+  "incremental_tests": "108 passed, zero failures, zero skips; core build zero warnings.",
+  "scope": "Engineering survey, not production migration acceptance. 23 of 24 repositories; raw extraction follows pinned committed manifests. F# measurement assemblies were Debug; C\u002B\u002B paired source build Release. All timings are local observations, not generalized performance claims.",
+  "staging_154": {
+    "declarations": 4807,
+    "fact_parsing_s": 0.4484374,
+    "files": 4167,
+    "matching_edges": 4685,
+    "native_all_relationships_s": 0.7713019,
+    "native_matching_s": 0.0209787,
+    "nodes": 16204,
+    "repositories": 23,
+    "scope": "23 snapshot-pinned repositories; module-open family only for SQL matching; six-column nodes plus fact tables for appender throughput; local isolated files; no PGQ extension or production publication",
+    "trials": [
+      {
+        "checkpoint_s": 0.0707121,
+        "load_s": 0.1746773,
+        "matching_s": 0.0049242,
+        "parity": true,
+        "repeat": 1,
+        "total_s": 0.3002921,
+        "version": "v1.5.4",
+        "workers": 1
+      },
+      {
+        "checkpoint_s": 0.0940123,
+        "load_s": 0.1573594,
+        "matching_s": 0.0053859,
+        "parity": true,
+        "repeat": 2,
+        "total_s": 0.2866306,
+        "version": "v1.5.4",
+        "workers": 1
+      },
+      {
+        "checkpoint_s": 0.0754288,
+        "load_s": 0.1834867,
+        "matching_s": 0.0045301,
+        "parity": true,
+        "repeat": 3,
+        "total_s": 0.2907492,
+        "version": "v1.5.4",
+        "workers": 1
+      },
+      {
+        "checkpoint_s": 0.087883,
+        "load_s": 0.1468466,
+        "matching_s": 0.0044394,
+        "parity": true,
+        "repeat": 1,
+        "total_s": 0.2656692,
+        "version": "v1.5.4",
+        "workers": 4
+      },
+      {
+        "checkpoint_s": 0.0781972,
+        "load_s": 0.1573572,
+        "matching_s": 0.0039613,
+        "parity": true,
+        "repeat": 2,
+        "total_s": 0.2644453,
+        "version": "v1.5.4",
+        "workers": 4
+      },
+      {
+        "checkpoint_s": 0.0712305,
+        "load_s": 0.1396086,
+        "matching_s": 0.0044,
+        "parity": true,
+        "repeat": 3,
+        "total_s": 0.2391385,
+        "version": "v1.5.4",
+        "workers": 4
+      },
+      {
+        "checkpoint_s": 0.0874584,
+        "load_s": 0.1620298,
+        "matching_s": 0.005485,
+        "parity": true,
+        "repeat": 1,
+        "total_s": 0.283179,
+        "version": "v1.5.4",
+        "workers": 8
+      },
+      {
+        "checkpoint_s": 0.0872716,
+        "load_s": 0.1628251,
+        "matching_s": 0.0053803,
+        "parity": true,
+        "repeat": 2,
+        "total_s": 0.2846552,
+        "version": "v1.5.4",
+        "workers": 8
+      },
+      {
+        "checkpoint_s": 0.0722697,
+        "load_s": 0.1643292,
+        "matching_s": 0.005155,
+        "parity": true,
+        "repeat": 3,
+        "total_s": 0.2718624,
+        "version": "v1.5.4",
+        "workers": 8
+      }
+    ],
+    "uses": 9312
+  },
+  "staging_preview": {
+    "declarations": 4807,
+    "fact_parsing_s": 0.4515268,
+    "files": 4167,
+    "matching_edges": 4685,
+    "native_all_relationships_s": 0.724687,
+    "native_matching_s": 0.0219054,
+    "nodes": 16204,
+    "repositories": 23,
+    "scope": "23 snapshot-pinned repositories; module-open family only for SQL matching; six-column nodes plus fact tables for appender throughput; local isolated files; no PGQ extension or production publication",
+    "trials": [
+      {
+        "checkpoint_s": 0.2888396,
+        "load_s": 0.198612,
+        "matching_s": 0.0074977,
+        "parity": true,
+        "repeat": 1,
+        "total_s": 0.5574293,
+        "version": "v2.0.0-alpha49096",
+        "workers": 1
+      },
+      {
+        "checkpoint_s": 0.2821468,
+        "load_s": 0.2024861,
+        "matching_s": 0.0070055,
+        "parity": true,
+        "repeat": 2,
+        "total_s": 0.5333303,
+        "version": "v2.0.0-alpha49096",
+        "workers": 1
+      },
+      {
+        "checkpoint_s": 0.2986973,
+        "load_s": 0.15926,
+        "matching_s": 0.0066602,
+        "parity": true,
+        "repeat": 3,
+        "total_s": 0.4982077,
+        "version": "v2.0.0-alpha49096",
+        "workers": 1
+      },
+      {
+        "checkpoint_s": 0.3288335,
+        "load_s": 0.1503316,
+        "matching_s": 0.0059261,
+        "parity": true,
+        "repeat": 1,
+        "total_s": 0.5188147,
+        "version": "v2.0.0-alpha49096",
+        "workers": 4
+      },
+      {
+        "checkpoint_s": 0.3172455,
+        "load_s": 0.144541,
+        "matching_s": 0.0080514,
+        "parity": true,
+        "repeat": 2,
+        "total_s": 0.5029578,
+        "version": "v2.0.0-alpha49096",
+        "workers": 4
+      },
+      {
+        "checkpoint_s": 0.3248118,
+        "load_s": 0.1633438,
+        "matching_s": 0.0091752,
+        "parity": true,
+        "repeat": 3,
+        "total_s": 0.5351121,
+        "version": "v2.0.0-alpha49096",
+        "workers": 4
+      },
+      {
+        "checkpoint_s": 0.329226,
+        "load_s": 0.1579543,
+        "matching_s": 0.0060209,
+        "parity": true,
+        "repeat": 1,
+        "total_s": 0.5325279,
+        "version": "v2.0.0-alpha49096",
+        "workers": 8
+      },
+      {
+        "checkpoint_s": 0.3287039,
+        "load_s": 0.1467528,
+        "matching_s": 0.0068445,
+        "parity": true,
+        "repeat": 2,
+        "total_s": 0.524158,
+        "version": "v2.0.0-alpha49096",
+        "workers": 8
+      },
+      {
+        "checkpoint_s": 0.3339691,
+        "load_s": 0.1509602,
+        "matching_s": 0.0066279,
+        "parity": true,
+        "repeat": 3,
+        "total_s": 0.532881,
+        "version": "v2.0.0-alpha49096",
+        "workers": 8
+      }
+    ],
+    "uses": 9312
+  },
+  "full_graph_154_direct": {
+    "edges": 29458,
+    "native_relationships_s": 0.7139854,
+    "nodes": 16273,
+    "repositories": 23,
+    "scope": "23 pinned repositories, full production node/edge columns and existing F# enrichment; isolated database, full source row appenders, PGQ parity and reopen; no publication or production deployment",
+    "trials": [
+      {
+        "checkpoint_s": 0.0101783,
+        "graph_creation_s": 0.1184609,
+        "load_s": 0.2303642,
+        "queries": [
+          {
+            "name": "outgoing",
+            "parity": true,
+            "rows": 5,
+            "seconds": 0.0193875
+          },
+          {
+            "name": "incoming",
+            "parity": true,
+            "rows": 8,
+            "seconds": 0.0028788
+          },
+          {
+            "name": "chunks",
+            "parity": true,
+            "rows": 2,
+            "seconds": 0.0022268
+          }
+        ],
+        "reopen_parity": true,
+        "repeat": 1,
+        "version": "v1.5.4",
+        "workers": 1
+      },
+      {
+        "checkpoint_s": 0.0111721,
+        "graph_creation_s": 0.1184481,
+        "load_s": 0.2221047,
+        "queries": [
+          {
+            "name": "outgoing",
+            "parity": true,
+            "rows": 5,
+            "seconds": 0.0046215
+          },
+          {
+            "name": "incoming",
+            "parity": true,
+            "rows": 8,
+            "seconds": 0.003643
+          },
+          {
+            "name": "chunks",
+            "parity": true,
+            "rows": 2,
+            "seconds": 0.0030945
+          }
+        ],
+        "reopen_parity": true,
+        "repeat": 2,
+        "version": "v1.5.4",
+        "workers": 1
+      },
+      {
+        "checkpoint_s": 0.0103053,
+        "graph_creation_s": 0.1210268,
+        "load_s": 0.2509973,
+        "queries": [
+          {
+            "name": "outgoing",
+            "parity": true,
+            "rows": 5,
+            "seconds": 0.0040925
+          },
+          {
+            "name": "incoming",
+            "parity": true,
+            "rows": 8,
+            "seconds": 0.0026905
+          },
+          {
+            "name": "chunks",
+            "parity": true,
+            "rows": 2,
+            "seconds": 0.0027031
+          }
+        ],
+        "reopen_parity": true,
+        "repeat": 3,
+        "version": "v1.5.4",
+        "workers": 1
+      },
+      {
+        "checkpoint_s": 0.011625,
+        "graph_creation_s": 0.1084496,
+        "load_s": 0.1715996,
+        "queries": [
+          {
+            "name": "outgoing",
+            "parity": true,
+            "rows": 5,
+            "seconds": 0.0038764
+          },
+          {
+            "name": "incoming",
+            "parity": true,
+            "rows": 8,
+            "seconds": 0.0030078
+          },
+          {
+            "name": "chunks",
+            "parity": true,
+            "rows": 2,
+            "seconds": 0.0025528
+          }
+        ],
+        "reopen_parity": true,
+        "repeat": 1,
+        "version": "v1.5.4",
+        "workers": 4
+      },
+      {
+        "checkpoint_s": 0.0109903,
+        "graph_creation_s": 0.1074999,
+        "load_s": 0.1726478,
+        "queries": [
+          {
+            "name": "outgoing",
+            "parity": true,
+            "rows": 5,
+            "seconds": 0.0038968
+          },
+          {
+            "name": "incoming",
+            "parity": true,
+            "rows": 8,
+            "seconds": 0.0036408
+          },
+          {
+            "name": "chunks",
+            "parity": true,
+            "rows": 2,
+            "seconds": 0.0035342
+          }
+        ],
+        "reopen_parity": true,
+        "repeat": 2,
+        "version": "v1.5.4",
+        "workers": 4
+      },
+      {
+        "checkpoint_s": 0.0111673,
+        "graph_creation_s": 0.1088996,
+        "load_s": 0.1698808,
+        "queries": [
+          {
+            "name": "outgoing",
+            "parity": true,
+            "rows": 5,
+            "seconds": 0.0036345
+          },
+          {
+            "name": "incoming",
+            "parity": true,
+            "rows": 8,
+            "seconds": 0.0029723
+          },
+          {
+            "name": "chunks",
+            "parity": true,
+            "rows": 2,
+            "seconds": 0.003727
+          }
+        ],
+        "reopen_parity": true,
+        "repeat": 3,
+        "version": "v1.5.4",
+        "workers": 4
+      },
+      {
+        "checkpoint_s": 0.0138076,
+        "graph_creation_s": 0.1321642,
+        "load_s": 0.2002805,
+        "queries": [
+          {
+            "name": "outgoing",
+            "parity": true,
+            "rows": 5,
+            "seconds": 0.0045882
+          },
+          {
+            "name": "incoming",
+            "parity": true,
+            "rows": 8,
+            "seconds": 0.0036767
+          },
+          {
+            "name": "chunks",
+            "parity": true,
+            "rows": 2,
+            "seconds": 0.0028723
+          }
+        ],
+        "reopen_parity": true,
+        "repeat": 1,
+        "version": "v1.5.4",
+        "workers": 8
+      },
+      {
+        "checkpoint_s": 0.0106596,
+        "graph_creation_s": 0.10895,
+        "load_s": 0.200542,
+        "queries": [
+          {
+            "name": "outgoing",
+            "parity": true,
+            "rows": 5,
+            "seconds": 0.0042378
+          },
+          {
+            "name": "incoming",
+            "parity": true,
+            "rows": 8,
+            "seconds": 0.003368
+          },
+          {
+            "name": "chunks",
+            "parity": true,
+            "rows": 2,
+            "seconds": 0.002791
+          }
+        ],
+        "reopen_parity": true,
+        "repeat": 2,
+        "version": "v1.5.4",
+        "workers": 8
+      },
+      {
+        "checkpoint_s": 0.0107049,
+        "graph_creation_s": 0.1070595,
+        "load_s": 0.1865503,
+        "queries": [
+          {
+            "name": "outgoing",
+            "parity": true,
+            "rows": 5,
+            "seconds": 0.0046455
+          },
+          {
+            "name": "incoming",
+            "parity": true,
+            "rows": 8,
+            "seconds": 0.0028358
+          },
+          {
+            "name": "chunks",
+            "parity": true,
+            "rows": 2,
+            "seconds": 0.0027593
+          }
+        ],
+        "reopen_parity": true,
+        "repeat": 3,
+        "version": "v1.5.4",
+        "workers": 8
+      }
+    ]
+  },
+  "full_graph_2_source_direct": {
+    "edges": 29458,
+    "native_relationships_s": 0.8320661,
+    "nodes": 16273,
+    "repositories": 23,
+    "scope": "23 pinned repositories, full production node/edge columns and existing F# enrichment; isolated database, full source row appenders, PGQ parity and reopen; no publication or production deployment",
+    "trials": [
+      {
+        "checkpoint_s": 0.0034511,
+        "graph_creation_s": 0.3153066,
+        "load_s": 0.2861483,
+        "queries": [
+          {
+            "name": "outgoing",
+            "parity": true,
+            "rows": 5,
+            "seconds": 0.0222922
+          },
+          {
+            "name": "incoming",
+            "parity": true,
+            "rows": 8,
+            "seconds": 0.0036519
+          },
+          {
+            "name": "chunks",
+            "parity": true,
+            "rows": 2,
+            "seconds": 0.0037558
+          }
+        ],
+        "reopen_parity": true,
+        "repeat": 1,
+        "version": "v2.0.0-dev1",
+        "workers": 1
+      },
+      {
+        "checkpoint_s": 0.0028821,
+        "graph_creation_s": 0.3134752,
+        "load_s": 0.2809896,
+        "queries": [
+          {
+            "name": "outgoing",
+            "parity": true,
+            "rows": 5,
+            "seconds": 0.0082644
+          },
+          {
+            "name": "incoming",
+            "parity": true,
+            "rows": 8,
+            "seconds": 0.0035751
+          },
+          {
+            "name": "chunks",
+            "parity": true,
+            "rows": 2,
+            "seconds": 0.0031687
+          }
+        ],
+        "reopen_parity": true,
+        "repeat": 2,
+        "version": "v2.0.0-dev1",
+        "workers": 1
+      },
+      {
+        "checkpoint_s": 0.0031195,
+        "graph_creation_s": 0.3225263,
+        "load_s": 0.2392209,
+        "queries": [
+          {
+            "name": "outgoing",
+            "parity": true,
+            "rows": 5,
+            "seconds": 0.0053258
+          },
+          {
+            "name": "incoming",
+            "parity": true,
+            "rows": 8,
+            "seconds": 0.0037546
+          },
+          {
+            "name": "chunks",
+            "parity": true,
+            "rows": 2,
+            "seconds": 0.0034669
+          }
+        ],
+        "reopen_parity": true,
+        "repeat": 3,
+        "version": "v2.0.0-dev1",
+        "workers": 1
+      },
+      {
+        "checkpoint_s": 0.0033742,
+        "graph_creation_s": 0.3557683,
+        "load_s": 0.1754234,
+        "queries": [
+          {
+            "name": "outgoing",
+            "parity": true,
+            "rows": 5,
+            "seconds": 0.0049594
+          },
+          {
+            "name": "incoming",
+            "parity": true,
+            "rows": 8,
+            "seconds": 0.0036597
+          },
+          {
+            "name": "chunks",
+            "parity": true,
+            "rows": 2,
+            "seconds": 0.0032336
+          }
+        ],
+        "reopen_parity": true,
+        "repeat": 1,
+        "version": "v2.0.0-dev1",
+        "workers": 4
+      },
+      {
+        "checkpoint_s": 0.003287,
+        "graph_creation_s": 0.3426289,
+        "load_s": 0.1793403,
+        "queries": [
+          {
+            "name": "outgoing",
+            "parity": true,
+            "rows": 5,
+            "seconds": 0.0045936
+          },
+          {
+            "name": "incoming",
+            "parity": true,
+            "rows": 8,
+            "seconds": 0.0037141
+          },
+          {
+            "name": "chunks",
+            "parity": true,
+            "rows": 2,
+            "seconds": 0.0036359
+          }
+        ],
+        "reopen_parity": true,
+        "repeat": 2,
+        "version": "v2.0.0-dev1",
+        "workers": 4
+      },
+      {
+        "checkpoint_s": 0.0029101,
+        "graph_creation_s": 0.3326052,
+        "load_s": 0.1723602,
+        "queries": [
+          {
+            "name": "outgoing",
+            "parity": true,
+            "rows": 5,
+            "seconds": 0.0048155
+          },
+          {
+            "name": "incoming",
+            "parity": true,
+            "rows": 8,
+            "seconds": 0.0034162
+          },
+          {
+            "name": "chunks",
+            "parity": true,
+            "rows": 2,
+            "seconds": 0.0032394
+          }
+        ],
+        "reopen_parity": true,
+        "repeat": 3,
+        "version": "v2.0.0-dev1",
+        "workers": 4
+      },
+      {
+        "checkpoint_s": 0.0035871,
+        "graph_creation_s": 0.362306,
+        "load_s": 0.1875437,
+        "queries": [
+          {
+            "name": "outgoing",
+            "parity": true,
+            "rows": 5,
+            "seconds": 0.0047904
+          },
+          {
+            "name": "incoming",
+            "parity": true,
+            "rows": 8,
+            "seconds": 0.0051542
+          },
+          {
+            "name": "chunks",
+            "parity": true,
+            "rows": 2,
+            "seconds": 0.0034537
+          }
+        ],
+        "reopen_parity": true,
+        "repeat": 1,
+        "version": "v2.0.0-dev1",
+        "workers": 8
+      },
+      {
+        "checkpoint_s": 0.0029518,
+        "graph_creation_s": 0.3621372,
+        "load_s": 0.1798741,
+        "queries": [
+          {
+            "name": "outgoing",
+            "parity": true,
+            "rows": 5,
+            "seconds": 0.0054755
+          },
+          {
+            "name": "incoming",
+            "parity": true,
+            "rows": 8,
+            "seconds": 0.0036953
+          },
+          {
+            "name": "chunks",
+            "parity": true,
+            "rows": 2,
+            "seconds": 0.0032061
+          }
+        ],
+        "reopen_parity": true,
+        "repeat": 2,
+        "version": "v2.0.0-dev1",
+        "workers": 8
+      },
+      {
+        "checkpoint_s": 0.004011,
+        "graph_creation_s": 0.3615465,
+        "load_s": 0.185553,
+        "queries": [
+          {
+            "name": "outgoing",
+            "parity": true,
+            "rows": 5,
+            "seconds": 0.0048001
+          },
+          {
+            "name": "incoming",
+            "parity": true,
+            "rows": 8,
+            "seconds": 0.0034958
+          },
+          {
+            "name": "chunks",
+            "parity": true,
+            "rows": 2,
+            "seconds": 0.003427
+          }
+        ],
+        "reopen_parity": true,
+        "repeat": 3,
+        "version": "v2.0.0-dev1",
+        "workers": 8
+      }
+    ]
+  },
+  "quack": {
+    "clients": [
+      {
+        "rows": 10000,
+        "seconds": 0.0429599,
+        "worker": 1
+      },
+      {
+        "rows": 10000,
+        "seconds": 0.0309151,
+        "worker": 2
+      },
+      {
+        "rows": 10000,
+        "seconds": 0.0301348,
+        "worker": 3
+      },
+      {
+        "rows": 10000,
+        "seconds": 0.0696781,
+        "worker": 4
+      }
+    ],
+    "distinct_rows": 40000,
+    "engine": "v2.0.0-alpha49096",
+    "rows": 40000,
+    "scope": "Four independent .NET/F# client processes over authenticated loopback Quack; shared server in-memory staging table; not a production service"
+  },
+  "extraction": [
+    {
+      "seconds": 6.1416705,
+      "trial": 1,
+      "workers": 1
+    },
+    {
+      "seconds": 6.150915,
+      "trial": 2,
+      "workers": 1
+    },
+    {
+      "seconds": 6.0974207,
+      "trial": 3,
+      "workers": 1
+    },
+    {
+      "seconds": 1.9020132,
+      "trial": 1,
+      "workers": 4
+    },
+    {
+      "seconds": 1.8877377,
+      "trial": 2,
+      "workers": 4
+    },
+    {
+      "seconds": 2.2248376,
+      "trial": 3,
+      "workers": 4
+    },
+    {
+      "seconds": 1.5639837,
+      "trial": 1,
+      "workers": 8
+    },
+    {
+      "seconds": 1.6921777,
+      "trial": 2,
+      "workers": 8
+    },
+    {
+      "seconds": 1.53662,
+      "trial": 3,
+      "workers": 8
+    }
+  ],
+  "context": {
+    "filename_matches": 0,
+    "files": [
+      {
+        "bytes": 7273,
+        "characters": 7273,
+        "filename_match_bytes": 0,
+        "filename_match_lines": 0,
+        "lines": 134,
+        "path": "docs/PSG_Nanopass_Architecture.md",
+        "repo": "FidelityFramework/Composer",
+        "revision": "ee0e581706549ac1881b0dfd8015cb9221312dea",
+        "topic_match_bytes": 154,
+        "topic_match_lines": 3
+      },
+      {
+        "bytes": 17817,
+        "characters": 17813,
+        "filename_match_bytes": 0,
+        "filename_match_lines": 0,
+        "lines": 324,
+        "path": "docs/fidelity/Baker_Saturation_Architecture.md",
+        "repo": "FidelityFramework/clef",
+        "revision": "09cab055fda0d82612388146c42c864ed1e71ca0",
+        "topic_match_bytes": 532,
+        "topic_match_lines": 7
+      },
+      {
+        "bytes": 164753,
+        "characters": 164570,
+        "filename_match_bytes": 0,
+        "filename_match_lines": 0,
+        "lines": 2284,
+        "path": "docs/Language_Coverage_Waypoints.md",
+        "repo": "FidelityFramework/Composer",
+        "revision": "ee0e581706549ac1881b0dfd8015cb9221312dea",
+        "topic_match_bytes": 910,
+        "topic_match_lines": 10
+      },
+      {
+        "bytes": 64729,
+        "characters": 64707,
+        "filename_match_bytes": 0,
+        "filename_match_lines": 0,
+        "lines": 951,
+        "path": "docs/Nanopass_Incremental_Contract_Direction.md",
+        "repo": "FidelityFramework/Composer",
+        "revision": "ee0e581706549ac1881b0dfd8015cb9221312dea",
+        "topic_match_bytes": 1351,
+        "topic_match_lines": 18
+      },
+      {
+        "bytes": 38042,
+        "characters": 38036,
+        "filename_match_bytes": 0,
+        "filename_match_lines": 0,
+        "lines": 435,
+        "path": "docs/PRDs/C-Series-Acceptance.md",
+        "repo": "FidelityFramework/Composer",
+        "revision": "ee0e581706549ac1881b0dfd8015cb9221312dea",
+        "topic_match_bytes": 1139,
+        "topic_match_lines": 7
+      }
+    ],
+    "full_file_bytes": 292614,
+    "full_file_characters": 292399,
+    "full_file_lines": 4128,
+    "full_file_read_count": 5,
+    "graph_edges": 5,
+    "graph_excerpt_characters": 3000,
+    "graph_json_bytes": 8162,
+    "graph_seconds": 1.133,
+    "graph_sources_omitted": 1,
+    "linked_files_without_seed_filename": 4,
+    "local_git_io_seconds": 0.0103784,
+    "question": "List outgoing links from docs/PSG_Nanopass_Architecture.md in FidelityFramework/Composer. Return the linked resources.",
+    "scope": "Controlled eager full-file reading replay over exactly the graph-located source and targets at published commits; no whole-repository searches; local I/O time excludes agent inference; graph output is bounded and reports omitted sources; not an agent speedup benchmark",
+    "snapshot_id": "7f77abc7662170936bd639dda50a09733015f5d07ed23581e7594438b8759576",
+    "topic_matches": 45
+  },
+  "lifecycle": {
+    "database": "/home/hhh/repos/fanion/.scratch/duckdb2-survey/lifecycle-published.duckdb",
+    "peer_with_activation": "passed",
+    "peer_without_activation": "failed: Parser Error: syntax error at or near \u0022:\u0022",
+    "renamed_readonly_reopen": "failed: TransactionContext Error: Invalid Input Error: Cannot execute statement of type \u0022CREATE\u0022 on database \u0022lifecycle-published\u0022 which is attached in read-only mode!",
+    "same_batch": "failed: Parser Error: syntax error at or near \u0022:\u0022",
+    "scope": "Exact paired source build; local unsigned artifact loading only; no metadata-mismatch override or deployment",
+    "transaction_graph_and_describe": "passed",
+    "unactivated": "failed: Parser Error: syntax error at or near \u0022:\u0022"
+  },
+  "timestamped_context_recheck": {
+    "at": "2026-10-20T14:26:14Z",
+    "seconds": 1.138,
+    "bytes": 8162,
+    "oracle_id_parity": true,
+    "request_sha256": "42dff0220b876d09f2d4d81b5a34315ff3c86b5febfefeef42cbdfcd64b73a96",
+    "response_sha256": "afee89fc414d9ea6aabb6627198edc2201e690bbf185bc32ba42fe92b33c6110"
+  },
+  "agent_loop_observations": {
+    "scope": "Four bounded tool-loop trials, same ONE model, raw policy free to choose reads. Not accepted as an answer-quality or speedup benchmark: all four final responses violated requested object schema; first graph trial returned all five correct resource tuples as a JSON array. Second graph trial omitted repository identities. Raw trials did not normalize cross-repository paths and omitted repository link. Graph tool payloads retained all five oracle results.",
+    "runs": [
+      {
+        "policy": "raw",
+        "trial": 1,
+        "model": "qwen3.5-4b:gguf:q5",
+        "seconds": 3.55591,
+        "model_calls": 7,
+        "tool_calls": 6,
+        "tool_bytes": 12959,
+        "input_tokens_cumulative": 18306,
+        "output_tokens": 444,
+        "correct": false,
+        "ended": true,
+        "events": [
+          {
+            "tool": "read_source",
+            "seconds": 0.0040424,
+            "bytes": 7617
+          },
+          {
+            "tool": "search_source",
+            "seconds": 0.0005267,
+            "bytes": 32
+          },
+          {
+            "tool": "search_source",
+            "seconds": 0.0005282,
+            "bytes": 533
+          },
+          {
+            "tool": "search_source",
+            "seconds": 0.0069341,
+            "bytes": 1899
+          },
+          {
+            "tool": "search_source",
+            "seconds": 0.0003052,
+            "bytes": 1297
+          },
+          {
+            "tool": "search_source",
+            "seconds": 0.000267,
+            "bytes": 1581
+          }
+        ]
+      },
+      {
+        "policy": "graph",
+        "trial": 1,
+        "model": "qwen3.5-4b:gguf:q5",
+        "seconds": 2.6029785,
+        "model_calls": 2,
+        "tool_calls": 1,
+        "tool_bytes": 7830,
+        "input_tokens_cumulative": 3740,
+        "output_tokens": 180,
+        "correct": false,
+        "ended": true,
+        "events": [
+          {
+            "tool": "ask_fanion",
+            "seconds": 1.0724048,
+            "bytes": 7830
+          }
+        ]
+      },
+      {
+        "policy": "graph",
+        "trial": 2,
+        "model": "qwen3.5-4b:gguf:q5",
+        "seconds": 3.5289082,
+        "model_calls": 3,
+        "tool_calls": 2,
+        "tool_bytes": 15660,
+        "input_tokens_cumulative": 9999,
+        "output_tokens": 182,
+        "correct": false,
+        "ended": true,
+        "events": [
+          {
+            "tool": "ask_fanion",
+            "seconds": 0.0070839,
+            "bytes": 7830
+          },
+          {
+            "tool": "ask_fanion",
+            "seconds": 0.8899952,
+            "bytes": 7830
+          }
+        ]
+      },
+      {
+        "policy": "raw",
+        "trial": 2,
+        "model": "qwen3.5-4b:gguf:q5",
+        "seconds": 2.4643105,
+        "model_calls": 7,
+        "tool_calls": 6,
+        "tool_bytes": 12959,
+        "input_tokens_cumulative": 18306,
+        "output_tokens": 444,
+        "correct": false,
+        "ended": true,
+        "events": [
+          {
+            "tool": "read_source",
+            "seconds": 0.000115,
+            "bytes": 7617
+          },
+          {
+            "tool": "search_source",
+            "seconds": 0.0002228,
+            "bytes": 32
+          },
+          {
+            "tool": "search_source",
+            "seconds": 0.0002192,
+            "bytes": 533
+          },
+          {
+            "tool": "search_source",
+            "seconds": 0.00026,
+            "bytes": 1899
+          },
+          {
+            "tool": "search_source",
+            "seconds": 0.0002535,
+            "bytes": 1297
+          },
+          {
+            "tool": "search_source",
+            "seconds": 0.0002273,
+            "bytes": 1581
+          }
+        ]
+      }
+    ]
+  },
+  "local_measurement_host_sha256": {
+    "pipeline.fsx": "40d29aff5f4de1ceb645153ecec723e0c1cd933e0769307c4009d08d9709bb64",
+    "graph-parity.fsx": "aaf6175c14de1f1ce77aa8b17170078a40f1bce8c69ffcd4022fb02225160aeb",
+    "quack-smoke.fsx": "3b60cb1f99cd8e5025180ba0ede6e36f233a361b94c68ac151e9b3d08aa06436",
+    "extract-times.fsx": "1c01ae9cd734fcda284263729e0281be4ad166b866c5d8fb2046b1207e92f47c",
+    "context-measure.fsx": "a9ed106e92b6cecd800651d573f2d7ab506a26a0b9808ae14ab6572dbc79098c",
+    "agent-comparison.fsx": "d61baf75518fefb26455e5cdcfb55ebf59fa1a35823441dc0d53fa61d958916f",
+    "lifecycle.fsx": "e3d5cc68ca92e0e7020b3e1d881d623de0d43e3ea2e875b11ec07879d219cd2b",
+    "request.fsx": "bbf9ebcdb9a14e41e208f5441edbcdac3ec3dbb5beceba02f7783403d79b57ec"
+  }
+}

@@ -1,12 +1,30 @@
 {
-  "duckdb_version": "v1.5.4",
+  "duckdb_version": "v2.0.0-dev1",
+  "duckdb_source_id": "45f4fdf315",
+  "duckdb_source_revision": "45f4fdf3153c89cd38fdf6fb20b95646a466c5ac",
   "platform": "linux_amd64",
-  "artifact": "https://github.com/duckdb/duckdb/releases/download/v1.5.4/libduckdb-linux-amd64.zip",
-  "zip_sha256": "838d98a85e697bab9935010c88a8c67d3312ccedcab4cb4a0ba01da65113bb70",
-  "libduckdb_so_sha256": "d7f30ef2ef4b813edb94ce82906329cc689672624a4161617ea33431040ce174",
-  "libduckdb_so_bytes": 70458712,
-  "duckdb_library_version_reported": "v1.5.4",
+  "libduckdb_so_sha256": "c511d4f96f5f8253d63bc864560e7e498261866a30e995025a175b2d445df59d",
+  "duckpgq_source_revision": "6b1d4b021daefb8b4e906b58def263f99158effb",
+  "build_type": "Release",
+  "compiler": "clang++",
+  "static_extensions": [
+    "core_functions",
+    "json",
+    "parquet",
+    "icu",
+    "duckpgq"
+  ],
   "accepted": true,
-  "checked_at": "2026-10-16",
-  "notes": "Official DuckDB shared library matching the Python wheel and the signed DuckPGQ f386a6c build in duckpgq-lock.json. Loaded by retrieval-native (DuckDB.NET.Bindings 1.5.3, engine supplied by this file) so the F# generation build runs the exact engine the gateway reads with. Local copy: ~/.local/state/speakez-retrieval/libduckdb-1.5.4/libduckdb.so; shipped in the release bundle as libduckdb.so."
+  "checked_at": "2026-10-20",
+  "notes": "Paired upstream source build. One hash binds DuckDB and built-in DuckPGQ; no runtime extension installation, unsigned loading or metadata-mismatch override. Not the final 2.0.0 release.",
+  "compiler_version": "clang version 23.1.3",
+  "build_flags": [
+    "GEN=ninja",
+    "CMAKE_BUILD_PARALLEL_LEVEL=6",
+    "-DBUILD_UNITTESTS=ON",
+    "-DDISABLE_UNITY=ON",
+    "-DSTATICALLY_LINK_EXTENSIONS=core_functions;json;parquet;icu;duckpgq"
+  ],
+  "build_log_sha256": "e16bc9075d85cd3159d17f9be43ccfef59221dbb55b002dab10680cf1fbedab3",
+  "binding_compatibility": "DuckDB.NET.Data and DuckDB.NET.Bindings 1.5.3; existing native C API for extension DDL, prepared reads after grammar activation."
 }
