@@ -2,8 +2,9 @@
 
 Use `/home/hhh/repos/fanion` as the primary checkout. No secondary worktrees,
 clones or copied repositories. Put scratch fixtures, receipts and logs in
-`.scratch/`; .NET outputs remain in `native/**/bin`, `native/**/obj` and
-`native/publish`. Keep credentials and corpus contents out of Git.
+`.scratch/`; .NET outputs remain in `src/**/bin`, `src/**/obj`,
+`tests/**/bin`, `tests/**/obj` and `.scratch/publish`.
+Keep credentials and corpus contents out of Git.
 
 Use the live retrieval schema to establish corpus coverage. For covered
 repositories require fresh/latest matching snapshot IDs, then use

@@ -23,7 +23,23 @@ The implementation is F#/.NET. Oxpecker handlers pass an explicit context.
 Ranvier derives the snapshot guard and corpus remit on demand.
 Fidelity.FSharp.Incremental owns queued model execution, shared demand and
 cancellation. SQLite owns durable indexing state; immutable DuckDB generations
-hold the graph.
+hold the graph. Fidelity.Data owns JSON and TOML parsing.
+
+```text
+Fanion.slnx
+src/Fanion/             F# service, extraction and graph publication
+  DuckDB/Load.fs        DuckDB.NET connection, engine binding and table loading
+tests/Fanion.Tests/     Application and engine integration tests
+config/                Corpus examples and pinned dependency identities
+docs/                  Architecture, API and operations
+tools/build.sh         Self-contained .NET publication
+```
+
+The service is currently .NET hosted. `DuckDB.NET.Data` supplies the ADO.NET
+connection and appender APIs; the pinned native library embeds DuckPGQ.
+PGQ statements run through that connection after grammar activation.
+There is no separate PGQ .NET provider. Clef-native hosting is the intended
+direction, not the current runtime.
 
 ```mermaid
 flowchart LR
@@ -58,16 +74,17 @@ the corpus.
 
 Build from this primary checkout with .NET 10 and sibling primary checkouts of
 [Ranvier](https://forge.spkez.dev/FidelityFramework/Ranvier) and
-[Fidelity.FSharp.Incremental](https://forge.spkez.dev/FidelityFramework/Fidelity.FSharp.Incremental).
+[Fidelity.FSharp.Incremental](https://forge.spkez.dev/FidelityFramework/Fidelity.FSharp.Incremental),
+and [Fidelity.Data](https://forge.spkez.dev/FidelityFramework/Fidelity.Data).
 The source dependency revisions are recorded in
 [config/source-dependencies.json](config/source-dependencies.json); these APIs
 are ahead of their published packages.
 
 ```bash
-bash native/build.sh
+bash tools/build.sh
 ```
 
-The self-contained Linux executable is `native/publish/retrieval-native`.
+The self-contained Linux executable is `.scratch/publish/retrieval-native`.
 The deployed CLI, service names and HTTP routes retain their existing names.
 [Operations](docs/OPERATIONS.md) covers engine artifacts, configuration, startup
 and release activation.
@@ -87,5 +104,5 @@ and release activation.
 | [Query prompt](docs/PQL-PROMPT.md) | Supported graph language and worked examples |
 
 The runtime and indexing receiver are here. The lab repository owns VM
-provisioning, nginx and agent installation. It consumes Fanion's source and
+provisioning, Forgejo hook enrollment, nginx and agent installation. It consumes Fanion's source and
 configuration rather than carrying another implementation.

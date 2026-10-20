@@ -10,7 +10,7 @@
       "libduckdb_so_sha256": "0a90ff143d97da93014603b02ca298fcae01cf31988b9e87289b674a18087812",
       "duckpgq_source_revision": "6b1d4b021daefb8b4e906b58def263f99158effb",
       "build_type": "Release",
-      "compiler": "clang\u002B\u002B-18",
+      "compiler": "clang++-18",
       "static_extensions": [
         "core_functions",
         "json",
@@ -540,7 +540,7 @@
   "module_open_prototype": {
     "scope": "Separate SQL staging feasibility prototype, official 2.0 alpha49096. Projected module-open endpoint/line/rule parity only; not complete provenance-record parity or the production Enrich pass.",
     "matched_relationships": 4685,
-    "sql_join_ms_range": "4\u20139",
+    "sql_join_ms_range": "4–9",
     "fsharp_matcher_ms": 21,
     "comparison_boundary": "Already parsed facts; SQL staging adds appender work. No complete cross-link speedup claimed."
   },
@@ -733,5 +733,322 @@
     "context-measure.fsx": "a9ed106e92b6cecd800651d573f2d7ab506a26a0b9808ae14ab6572dbc79098c",
     "target-live-acceptance.fsx": "69779998919bc27f786730a210ffcaacd6449ca1bcaabd6aaae84d809639448c",
     "startup-capacity.fsx": "7a75dfddfcf101ca43d66683abdf81112317339597e893fefaa898e34d34fb62"
+  },
+  "sql_cross_link_migration": {
+    "scope": "23 immutable repository components; complete Generation including parsing, SQL relationships, validation, hashing and durable commit. No remote observation or extraction.",
+    "baseline_trials": [
+      {
+        "capabilities": 69,
+        "derived_edges": 10760,
+        "edges": 29458,
+        "edges_by_kind": [
+          {
+            "count": 12014,
+            "kind": "chunks_of"
+          },
+          {
+            "count": 4167,
+            "kind": "contains"
+          },
+          {
+            "count": 46,
+            "kind": "declares_capability"
+          },
+          {
+            "count": 158,
+            "kind": "generated_by"
+          },
+          {
+            "count": 115,
+            "kind": "generated_from"
+          },
+          {
+            "count": 3557,
+            "kind": "links_to"
+          },
+          {
+            "count": 1693,
+            "kind": "mentions"
+          },
+          {
+            "count": 7575,
+            "kind": "references_project"
+          },
+          {
+            "count": 54,
+            "kind": "shares_capability"
+          },
+          {
+            "count": 79,
+            "kind": "suggests_capability"
+          }
+        ],
+        "nodes": 16273,
+        "phases": {
+          "components": 0.3967839,
+          "duckdb": 0.7558735,
+          "hash": 0.8331817,
+          "relationships": 0.8067912,
+          "validate": 0.0613609
+        },
+        "repeat": 1,
+        "snapshot": "20a58ea9dc53d5b7384678b4e0efd59912f21a83e26df1083194e5e17e7a1dde",
+        "total_seconds": 2.8569632
+      },
+      {
+        "capabilities": 69,
+        "derived_edges": 10760,
+        "edges": 29458,
+        "edges_by_kind": [
+          {
+            "count": 12014,
+            "kind": "chunks_of"
+          },
+          {
+            "count": 4167,
+            "kind": "contains"
+          },
+          {
+            "count": 46,
+            "kind": "declares_capability"
+          },
+          {
+            "count": 158,
+            "kind": "generated_by"
+          },
+          {
+            "count": 115,
+            "kind": "generated_from"
+          },
+          {
+            "count": 3557,
+            "kind": "links_to"
+          },
+          {
+            "count": 1693,
+            "kind": "mentions"
+          },
+          {
+            "count": 7575,
+            "kind": "references_project"
+          },
+          {
+            "count": 54,
+            "kind": "shares_capability"
+          },
+          {
+            "count": 79,
+            "kind": "suggests_capability"
+          }
+        ],
+        "nodes": 16273,
+        "phases": {
+          "components": 0.2455794,
+          "duckdb": 0.7314506,
+          "hash": 0.8067781,
+          "relationships": 0.6315525,
+          "validate": 0.0237699
+        },
+        "repeat": 2,
+        "snapshot": "20a58ea9dc53d5b7384678b4e0efd59912f21a83e26df1083194e5e17e7a1dde",
+        "total_seconds": 2.4394687
+      },
+      {
+        "capabilities": 69,
+        "derived_edges": 10760,
+        "edges": 29458,
+        "edges_by_kind": [
+          {
+            "count": 12014,
+            "kind": "chunks_of"
+          },
+          {
+            "count": 4167,
+            "kind": "contains"
+          },
+          {
+            "count": 46,
+            "kind": "declares_capability"
+          },
+          {
+            "count": 158,
+            "kind": "generated_by"
+          },
+          {
+            "count": 115,
+            "kind": "generated_from"
+          },
+          {
+            "count": 3557,
+            "kind": "links_to"
+          },
+          {
+            "count": 1693,
+            "kind": "mentions"
+          },
+          {
+            "count": 7575,
+            "kind": "references_project"
+          },
+          {
+            "count": 54,
+            "kind": "shares_capability"
+          },
+          {
+            "count": 79,
+            "kind": "suggests_capability"
+          }
+        ],
+        "nodes": 16273,
+        "phases": {
+          "components": 0.2528813,
+          "duckdb": 0.7116037,
+          "hash": 0.8224951,
+          "relationships": 0.6081246,
+          "validate": 0.0267945
+        },
+        "repeat": 3,
+        "snapshot": "20a58ea9dc53d5b7384678b4e0efd59912f21a83e26df1083194e5e17e7a1dde",
+        "total_seconds": 2.4222043
+      }
+    ],
+    "sql_before_parser_migration_trials": [
+      {
+        "capabilities": 69,
+        "derived_edges": 10760,
+        "edges": 29458,
+        "nodes": 16273,
+        "phases": {
+          "checkpoint": 0.4985928,
+          "components": 0.3245677,
+          "duckdb": 0.197061,
+          "hash": 1.0058931,
+          "relationship_join": 0.2571201,
+          "relationship_read": 0.0164386,
+          "relationship_scan": 0.8862824,
+          "relationship_stage": 0.1979839,
+          "relationships": 1.5923595,
+          "validate": 0.0815641
+        },
+        "repeat": 1,
+        "snapshot": "20a58ea9dc53d5b7384678b4e0efd59912f21a83e26df1083194e5e17e7a1dde",
+        "total_seconds": 3.7017625
+      },
+      {
+        "capabilities": 69,
+        "derived_edges": 10760,
+        "edges": 29458,
+        "nodes": 16273,
+        "phases": {
+          "checkpoint": 0.487743,
+          "components": 0.2814529,
+          "duckdb": 0.1803812,
+          "hash": 0.8539374,
+          "relationship_join": 0.260848,
+          "relationship_read": 0.0125254,
+          "relationship_scan": 0.5151383,
+          "relationship_stage": 0.0965001,
+          "relationships": 1.0276971,
+          "validate": 0.0307287
+        },
+        "repeat": 2,
+        "snapshot": "20a58ea9dc53d5b7384678b4e0efd59912f21a83e26df1083194e5e17e7a1dde",
+        "total_seconds": 2.8623811
+      },
+      {
+        "capabilities": 69,
+        "derived_edges": 10760,
+        "edges": 29458,
+        "nodes": 16273,
+        "phases": {
+          "checkpoint": 0.5083301,
+          "components": 0.393288,
+          "duckdb": 0.1815783,
+          "hash": 0.8409874,
+          "relationship_join": 0.2554403,
+          "relationship_read": 0.0099176,
+          "relationship_scan": 0.3896417,
+          "relationship_stage": 0.0856645,
+          "relationships": 0.8970784,
+          "validate": 0.02981
+        },
+        "repeat": 3,
+        "snapshot": "20a58ea9dc53d5b7384678b4e0efd59912f21a83e26df1083194e5e17e7a1dde",
+        "total_seconds": 2.8513713
+      }
+    ],
+    "fidelity_data_trials": [
+      {
+        "capabilities": 69,
+        "derived_edges": 10760,
+        "edges": 29458,
+        "nodes": 16273,
+        "phases": {
+          "checkpoint": 1.2050391,
+          "components": 9.3206518,
+          "duckdb": 0.4685036,
+          "hash": 1.8662535,
+          "relationship_join": 0.5757268,
+          "relationship_read": 0.0318972,
+          "relationship_scan": 1.1338382,
+          "relationship_stage": 0.301131,
+          "relationships": 2.2854567,
+          "validate": 0.0673345
+        },
+        "repeat": 1,
+        "snapshot": "20a58ea9dc53d5b7384678b4e0efd59912f21a83e26df1083194e5e17e7a1dde",
+        "total_seconds": 15.216465
+      },
+      {
+        "capabilities": 69,
+        "derived_edges": 10760,
+        "edges": 29458,
+        "nodes": 16273,
+        "phases": {
+          "checkpoint": 1.2635527,
+          "components": 8.2419631,
+          "duckdb": 0.4631281,
+          "hash": 1.9175306,
+          "relationship_join": 0.6366476,
+          "relationship_read": 0.0298006,
+          "relationship_scan": 0.7690034,
+          "relationship_stage": 0.2228775,
+          "relationships": 1.8430824,
+          "validate": 0.0650228
+        },
+        "repeat": 2,
+        "snapshot": "20a58ea9dc53d5b7384678b4e0efd59912f21a83e26df1083194e5e17e7a1dde",
+        "total_seconds": 13.794995
+      },
+      {
+        "capabilities": 69,
+        "derived_edges": 10760,
+        "edges": 29458,
+        "nodes": 16273,
+        "phases": {
+          "checkpoint": 0.5396235,
+          "components": 8.5649527,
+          "duckdb": 0.1993998,
+          "hash": 0.7934772,
+          "relationship_join": 0.4120108,
+          "relationship_read": 0.0101112,
+          "relationship_scan": 0.7924931,
+          "relationship_stage": 0.2318943,
+          "relationships": 1.6563307,
+          "validate": 0.0378322
+        },
+        "repeat": 3,
+        "snapshot": "20a58ea9dc53d5b7384678b4e0efd59912f21a83e26df1083194e5e17e7a1dde",
+        "total_seconds": 11.7922802
+      }
+    ],
+    "full_field_parity": true,
+    "interpretation": "All node and edge fields, row order, metadata and canonical snapshot match. No end-to-end speedup: Fidelity.Data parsing is the next optimization target. Early trials overlapped test activity, so timings are diagnostic, not isolated benchmarks. Latest requests still wait for the complete publication fence.",
+    "validation": {
+      "fanion_passed": 152,
+      "fanion_skipped": 2,
+      "fidelity_data_passed": 432,
+      "fidelity_data_ignored": 1
+    }
   }
 }

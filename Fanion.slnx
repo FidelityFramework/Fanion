@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Fanion/Fanion.fsproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Fanion.Tests/Fanion.Tests.fsproj" />
+  </Folder>
+</Solution>

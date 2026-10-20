@@ -102,11 +102,24 @@ Check the active-generation identity first; never move a serving generation.
 
 ## Indexing and cross-linking measurements
 
-`Enrich` remains the authority for relationship semantics. An engine-side staging
-prototype reproduced all 4,685 module-open relationships on 23 pinned repositories
-when comparing endpoints, evidence line and rule. Other rule families and full
-provenance-record parity were outside that prototype. It is not a replacement
-for the production relationship pass.
+`Enrich` remains the authority for relationship semantics, with its cross-file
+matching now expressed as SQL over temporary staging tables. The earlier
+4,685-row module-open experiment covered only one rule family.
+
+The full migration fixture contains 23 pinned repositories, 16,273 nodes,
+29,458 total edges and 10,760 derived edges across all relationship families.
+Before the subsequent parser migration, both one-thread and eight-thread runs
+matched every stored column, row order, metadata and canonical snapshot hash.
+Complete generation took 2.85–3.70 seconds against 2.42–2.86 seconds in the
+previous implementation. SQL joining took about 250 ms; this is not an overall
+speedup. Parsing, hashing and the durable commit remain part of the queued
+generation interval. These measurements exclude source extraction and remote
+ref observation.
+
+The coordinator also avoids re-extracting unchanged declared dependents:
+verified structural components are reused, while cross-links are rebuilt over
+all peers. The following earlier loading experiments describe separate
+prototypes, not the production transaction's phase timings.
 
 With the full production node/edge layout—16,273 nodes and 29,458 edges—three
 trials through `Load.openEngine` on the locked Ubuntu-built artifact gave these

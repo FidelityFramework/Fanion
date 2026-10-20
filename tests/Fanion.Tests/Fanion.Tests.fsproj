@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- The service's test suite: one-for-one ports of the former Python suites (index state,
+       extractor, policy, relationships, store, grammars, examples, English planner) plus
+       coordinator, gateway and guest-probe tests against local fixture repositories and the
+       real engine (RETRIEVAL_TEST_EXTENSIONS / RETRIEVAL_TEST_LIBDUCKDB). -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <OutputType>Exe</OutputType>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- The referenced toolchain is a self-contained executable; the test host must match. -->
+    <RuntimeIdentifier>linux-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="IndexStateTests.fs" />
+    <Compile Include="CoordinatorTests.fs" />
+    <Compile Include="ProbeTests.fs" />
+    <Compile Include="EnrichTests.fs" />
+    <Compile Include="ExtractTests.fs" />
+    <Compile Include="PolicyTests.fs" />
+    <Compile Include="QueryTests.fs" />
+    <Compile Include="GbnfTests.fs" />
+    <Compile Include="ExamplesTests.fs" />
+    <Compile Include="EnglishTests.fs" />
+    <Compile Include="ServeTests.fs" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- xunit.v3 builds a Microsoft.Testing.Platform executable; run bin/.../Fanion.Tests directly. -->
+    <PackageReference Include="xunit.v3" Version="4.0.2" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/Fanion/Fanion.fsproj" />
+  </ItemGroup>
+</Project>

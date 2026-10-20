@@ -63,7 +63,7 @@ roll the authoritative desired revision backward.
 ## Enrollment
 
 The checked hook reconciler is
-[`tools/forgejo/forgejo_corpus_hooks.py`](../tools/forgejo/forgejo_corpus_hooks.py).
+[`forgejo_corpus_hooks.py` in the lab's integration tooling](https://forge.spkez.dev/SpeakEZ.Tech/speakez-lab/src/branch/main/platform/retrieval/integration/forgejo_corpus_hooks.py).
 It is existing deployment tooling for the current Forgejo installation; the
 receiver and indexer themselves are F#.
 
@@ -83,7 +83,7 @@ a private rollback copy. It tests delivery and emits a sanitized receipt.
 The lab's
 [MGR hook installer](https://forge.spkez.dev/SpeakEZ.Tech/speakez-lab/src/branch/main/platform/retrieval/integration/install_corpus_webhooks.py)
 owns VM identity checks, ingress and private transport between guests. Stage
-the reviewed helper from this repository alongside that installer and pass
+the reviewed helper from the same lab integration directory alongside that installer and pass
 the helper's SHA-256. The installer reads VM71's **active** corpus and HMAC
 secret privately, invokes the helper in VM55, and joins each Forgejo delivery
 UUID to its exact durable receiver event. It then requires fresh schema.

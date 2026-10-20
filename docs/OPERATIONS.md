@@ -2,22 +2,23 @@
 
 Build and test in the primary checkout. Use `.scratch/` for local receipts,
 test fixtures and acquired engine artifacts; generated .NET files remain under
-`native/`. The application is self-contained F#/.NET. Python is used only by
-the existing Forgejo enrollment and lab deployment helpers.
+`src/` and `tests/`. Publication output goes in `.scratch/publish/`.
+The application is self-contained F#/.NET. Existing administrative deployment
+and Forgejo enrollment helpers live in the lab repository.
 
 ## Build inputs
 
 Use .NET 10 and the sibling primary source checkouts listed in
 [`source-dependencies.json`](../config/source-dependencies.json). Freeze those
 revisions and their working trees during acceptance. The project references
-use source because the required Incremental and Ranvier APIs are ahead of
-their published packages. Record dependency commits with each release.
+use source for the reviewed Incremental, Ranvier and Fidelity.Data APIs.
+Record dependency commits with each release.
 
 ```bash
-bash native/build.sh
+bash tools/build.sh
 ```
 
-Publishing produces `native/publish/retrieval-native` for Linux x64, including
+Publishing produces `.scratch/publish/retrieval-native` for Linux x64, including
 the .NET runtime. It does not bundle model weights, provision a guest or start
 services.
 
@@ -32,8 +33,8 @@ Validate the executable and native library in the target userland before
 activation:
 
 ```bash
-native/publish/retrieval-native probe --only engine \
-  --libduckdb native/publish/libduckdb.so \
+.scratch/publish/retrieval-native probe --only engine \
+  --libduckdb .scratch/publish/libduckdb.so \
   --libduckdb-lock config/libduckdb-lock.json \
   --duckpgq-lock config/duckpgq-lock.json
 ```

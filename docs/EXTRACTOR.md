@@ -1,7 +1,7 @@
 # Committed-Git extractor
 
 `retrieval-native extract` calls `Extract.build` in
-[`Extract.fs`](../native/Retrieval.Native/Extract.fs), using Git as its only
+[`Extract.fs`](../src/Fanion/Extract.fs), using Git as its only
 external program. It reads exact committed objects and returns a deterministic
 source snapshot. Fetching, reconciliation and publication belong to the
 coordinator.
@@ -51,8 +51,8 @@ branch, fetch refs, or crawl adjacent checkouts. The configured ref is authorita
 Run locally with:
 
 ```bash
-native/publish/retrieval-native extract manifest.json snapshot.json
-# tests: native/Retrieval.Native.Tests (ExtractTests.fs); see README.md for the run command
+.scratch/publish/retrieval-native extract manifest.json snapshot.json
+# tests: tests/Fanion.Tests (ExtractTests.fs); see README.md for the run command
 ```
 
 The CLI writes a private `0600` temporary file, flushes it, atomically replaces

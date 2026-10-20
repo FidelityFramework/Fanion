@@ -6,7 +6,7 @@ belong with each result.
 
 ## Local gates
 
-The native suite covers source extraction, policy, deterministic identity,
+The F# suite covers source extraction, policy, deterministic identity,
 query constraints, model transport, coordinator recovery, HTTP authentication,
 webhooks, freshness and request lifetimes. Engine-backed cases need the pinned
 DuckDB library with built-in DuckPGQ.
@@ -15,11 +15,11 @@ From this checkout, with artifacts under `.scratch/engine/`:
 
 ```bash
 mkdir -p .scratch/test-tmp
-dotnet build native/Retrieval.Native.Tests/Retrieval.Native.Tests.fsproj -nologo
+dotnet build tests/Fanion.Tests/Fanion.Tests.fsproj -nologo
 TMPDIR="$PWD/.scratch/test-tmp" \
 RETRIEVAL_TEST_EXTENSIONS="$PWD/.scratch/engine/extensions" \
 RETRIEVAL_TEST_LIBDUCKDB="$PWD/.scratch/engine/libduckdb.so" \
-  native/Retrieval.Native.Tests/bin/Debug/net10.0/linux-x64/Retrieval.Native.Tests \
+  tests/Fanion.Tests/bin/Debug/net10.0/linux-x64/Fanion.Tests \
   -noLogo -noColor -maxThreads 2
 ```
 
@@ -27,14 +27,22 @@ In the shared lab, wrap substantial build/test commands with Bozzetto's
 `tools/build/lease.fsx` using `full_build` or `test_suite_run`. Keep source and
 dependency checkouts fixed until the gate finishes.
 
-Hook-registration tests use mocked administrative I/O and require no secrets:
+The lab owns hook-registration tests alongside the administrative installer in
+`platform/retrieval/integration`. These use mocked I/O and require no secrets.
+It separately tests packaging, rollout rollback, MGR hook transport and Pi.
 
-```bash
-cd tools/forgejo
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -q test_forgejo_corpus_hooks
-```
+The `src/` and `tests/` reorganization and Fidelity.Data migration passed 152
+Fanion tests with two retained external-validator skips. The owning TOML changes
+passed 432 Fidelity.Data tests with one existing ignored case. All fields,
+row ordering, metadata and canonical identity of the 23-repository graph match
+the retained baseline in three trials.
 
-The lab separately tests packaging, rollout rollback, MGR hook transport and Pi.
+This is a source checkpoint. Complete generation currently takes 11.8–15.2 s
+after the parser migration; the component phase accounts for 8.2–9.3 s.
+An isolated 27.8 MB component allocates about 5 GB while parsing JSON strings.
+The existing duplicate-member check takes about 5 ms. Optimize the owning
+Fidelity.Data parser and repeat the target memory-capacity gate before rollout.
+These results do not change the accepted live-service measurements below.
 The runtime queue acceptance has six lifecycle controls: shared computation
 with independent cancellation; distinct requests respecting model capacity;
 publication waiting and rebind; physical cancellation drain; bounded retention;

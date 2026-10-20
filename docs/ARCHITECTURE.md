@@ -44,9 +44,23 @@ request.
 ## Generation lifetime
 
 Push deliveries are authenticated hints. The configured remote and explicit
-ref determine authoritative revisions. Changed components and declared
-dependents are extracted; unchanged components are reused. Cross-links are
-recomputed over the complete assembled revision set.
+ref determine authoritative revisions. Changed or explicitly invalidated
+components are extracted. Unchanged components are reused after verifying their
+revision, extraction fingerprint and checksum, including unchanged declared
+dependents. Cross-links are recomputed over the complete assembled revision set.
+
+F# extracts lexical facts. DuckDB temporary tables join those facts across the
+corpus, resolve references, enforce owner ambiguity rules, build capability
+relationships and select the first supporting evidence deterministically.
+Derived rows are read once for canonical hashing and validation, then inserted
+directly from staging into the candidate edge table in the same transaction.
+No staging table is published. A failed transaction removes the candidate.
+
+Fidelity.Data owns JSON and TOML parsing. Its ordered TOML result preserves
+dependency declaration order before maps are constructed. Fanion's input boundary
+rejects duplicate JSON members, invalid UTF-8 and non-integral spellings where an
+integer is required. `Canonical` owns the existing snapshot byte contract so a
+parser migration does not silently change graph identities.
 
 The coordinator writes and checks an immutable DuckDB artifact before asking
 `IndexState` to publish it. SQLite compares the build lease, desired epoch,
