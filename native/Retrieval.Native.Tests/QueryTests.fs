@@ -372,7 +372,7 @@ let ``64 repository policies fit the schema response budget`` () =
     Assert.Contains("metadata exceeds", loadError (fun () -> g.Load(oversized, "oversized-metadata") |> ignore))
 
 [<Fact>]
-let ``build and serving connections use eight threads`` () =
+let ``build and serving connections bound both native thread pools`` () =
     use g = new Graph(requireEngine ())
     let report = Retrieval.Native.Generation.load g.Engine defaultBudgets g.Source (Path.Combine(g.Root, "thread-check.duckdb"))
     Assert.Equal(8, report.Threads)
@@ -384,6 +384,7 @@ let ``build and serving connections use eight threads`` () =
     peer.Open()
     let setting (name: string) = (use c = peer.CreateCommand() in c.CommandText <- sprintf "SELECT current_setting('%s')" name; c.ExecuteScalar())
     Assert.Equal(8L, Convert.ToInt64(setting "threads"))
+    Assert.Equal(8L, Convert.ToInt64(setting "async_threads"))
     Assert.True(Convert.ToBoolean(setting "lock_configuration"))
     Assert.False(Convert.ToBoolean(setting "enable_external_access"))
 

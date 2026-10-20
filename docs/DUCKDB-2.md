@@ -50,6 +50,12 @@ executes this separately, before any PGQ statement is parsed:
 SET active_grammar_extensions = ['duckpgq'];
 ```
 
+Both native thread pools and the memory budget are supplied as connection
+options before opening the database. The service's eight-thread budget also
+bounds DuckDB's asynchronous pool to eight; host CPU discovery must not create
+extra pools before those limits take effect. Service acceptance includes the
+actual 128-task and 1,536 MiB limits, including graph reads.
+
 DuckDB.NET.Data/Bindings 1.5.3 remain the host adapter. Extension DDL uses the
 existing native `DuckDBQuery` API with result destruction in `finally` because
 implicit preparation is unsupported for this graph-creation path. Validated
@@ -105,9 +111,9 @@ checks. Measurements ran on Z13 against 23 pinned local repository components.
 
 | Appenders | Load | Graph construction | Explicit checkpoint |
 | ---: | ---: | ---: | ---: |
-| 1 | 307 | 318 | 3.2 |
-| 4 | 236 | 348 | 2.9 |
-| 8 | 247 | 355 | 3.3 |
+| 1 | 299 | 315 | 3.2 |
+| 4 | 233 | 344 | 2.8 |
+| 8 | 252 | 363 | 3.5 |
 
 Outgoing, incoming and chunk queries matched edge-table oracles, including after
 reopening. Four appenders helped loading; eight gave no consistent further gain.

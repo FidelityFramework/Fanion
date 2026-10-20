@@ -191,6 +191,11 @@ let openEngine (engine: Engine) (database: string) =
     installEngine engine
     let settings = DuckDBConnectionStringBuilder()
     settings.["Data Source"] <- database
+    // Native pools start during Open, before any SQL can constrain them.
+    // Bound both pools from the existing engine budget, including during startup.
+    settings.["threads"] <- string engine.Threads
+    settings.["async_threads"] <- string engine.Threads
+    settings.["memory_limit"] <- engine.MemoryLimit
     settings.["autoinstall_known_extensions"] <- "false"
     settings.["autoload_known_extensions"] <- "false"
     let connection = new DuckDBConnection(settings.ConnectionString)
@@ -206,8 +211,6 @@ let openEngine (engine: Engine) (database: string) =
         if builtin <> "(BUILT-IN)" then raise (LoadError "DuckPGQ must be built into the verified library")
         let loaded = string (scalar connection "SELECT extension_version FROM duckdb_extensions() WHERE extension_name='duckpgq'")
         if loaded <> engine.DuckPgqVersion then raise (LoadError "DuckPGQ version differs from the reviewed lock")
-        execute connection (sprintf "SET threads=%d" engine.Threads)
-        execute connection ("SET memory_limit=" + literal engine.MemoryLimit)
         execute connection "SET active_grammar_extensions=['duckpgq']"
         connection
     with _ ->

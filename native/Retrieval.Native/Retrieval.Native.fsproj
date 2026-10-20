@@ -67,7 +67,7 @@
     <ProjectReference Include="../../../Ranvier/src/Ranvier/Ranvier.fsproj" />
     <PackageReference Include="Oxpecker" Version="2.1.1" />
     <PackageReference Include="Tomlyn" Version="0.19.0" />
-    <!-- Bindings only: the engine is the hash-pinned official libduckdb 1.5.4 shipped in the release bundle. -->
+    <!-- Bindings only: the release supplies its hash-pinned paired DuckDB/DuckPGQ library. -->
     <PackageReference Include="DuckDB.NET.Data" Version="1.5.3" />
     <!-- Durable coordinator state and the publication/freshness fence. -->
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.13" />

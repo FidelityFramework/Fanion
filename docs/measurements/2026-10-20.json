@@ -1,6 +1,6 @@
 {
   "date": "2026-10-20",
-  "scope": "Pinned source and target-runtime validation; measurement scopes remain distinct. Indexing fixtures use23local repositories; live deployment must validate all24configured repositories.",
+  "scope": "Pinned source and target-runtime validation; measurement scopes remain distinct. Indexing fixtures use 23 local repositories; live deployment must validate all 24 configured repositories.",
   "artifact": {
     "library_lock": {
       "duckdb_version": "v2.0.0-dev1",
@@ -52,20 +52,23 @@
       "checked_at": "2026-10-20",
       "notes": "DuckPGQ is built into the exact libduckdb artifact in libduckdb-lock.json. Every connection activates its grammar independently before parsing PGQ."
     },
-    "native_binary_sha256": "3e03fdac12fde96ddb327443060acda5fc0856103f305b3c0a20bac68a7b1f94"
+    "native_binary_sha256": "4a907777c23581daa8038c2ecf7461b09a0f2d2dd0dd0ab8d8d941161ddab9e4"
   },
   "checks": {
     "native_full": "142 total, 140 passed, 2 retained optional native-validator skips, zero failures; Z13, exact locked library. Includes separate-process active-file lock regression.",
-    "target_runtime": "Ubuntu 24.04/glibc 2.39: published executable engine preflight, 25 query/probe tests and 2 coordinator tests passed.",
+    "target_runtime": "Ubuntu 24.04/glibc 2.39: 25 query/probe tests passed under MemoryMax=1536M and TasksMax=128, peak 186.4 MiB. Earlier two coordinator target tests retained; current full native suite also covers coordinator.",
     "upstream_sql": "4944 assertions in 73 cases, inside target Ubuntu userland, exact locked library.",
-    "lab_packaging": "78 passed; changed artifacts, rollback sources, complete rollback state and host relay of guest diagnostics.",
+    "lab_packaging": "91 passed in unfiltered discovery, including legacy replacement tests; changed artifacts, rollback sources, complete rollback state, startup deadlines, candidate-unit resource preflight and diagnostic failure preserving rollback.",
     "log_sha256": {
-      "native_full": "70e96c85bc82d2f73352caaef9aa8f031e88eb0ea148d7d596e477c6b4f5686c",
-      "target_runtime": "d5922bbab4ae9c6015b50e2d404b1ba3a20e9802c48b80d481eaca9c7a58f206",
+      "native_full": "9952d8c66146502dd5ef91fb9e2dced6b5b03cf780973b1035f8b28452acf2cf",
+      "target_runtime": "defcdaae4cd567eed79877a4cfbff90c36062c3deeacf9abcd0ecbbff6c15c4b",
       "upstream_sql": "cfee252b44c9dce901cbb1b8e2c9c279795939fdbd3541385be762047fab6c5a",
-      "lab_packaging": "c21cea3738e768a5d0361e5d31899e642050e9d249293f7fd6ccab7d2f45cf36"
+      "lab_packaging": "52140a1627991cb4df754a1ac08c80cd5fcc86d3d6323214384228ad59389cd9",
+      "startup_control": "a1f5ed2637ae0c50f9bc04934947c6913542ebee970fa691d3b0292286bfa141",
+      "startup_fixed": "aaab0dfb2ef9922f6d01441bfd2c5cc4718903c5dd9ba63325c7b1270e11f9bf"
     },
-    "retained_mutations": "Unchanged guards: grammar activation, engine source identity, generation identity, inactive-target verification and active-file lock. Each was discriminated before this artifact rebuild; restored fullsuite on this artifact passed."
+    "retained_mutations": "Unchanged guards: grammar activation, engine source identity, generation identity, inactive-target verification and active-file lock. Each was discriminated before this artifact rebuild; restored full suite on this artifact passed.",
+    "startup_control": "Earlier published executable: TasksMax=128 produced 15 task-limit events, zero memory-limit/OOM events, peak 80 MiB. Corrected engine-only executable: zero task-limit or memory-limit events, peak 41.7 MiB. Both used MemoryMax=1536M. threads, async_threads and memory_limit are now supplied before Open."
   },
   "indexing_input_repositories": [
     {
@@ -165,34 +168,34 @@
   "indexing": {
     "edges": 29458,
     "libduckdb_sha256": "0a90ff143d97da93014603b02ca298fcae01cf31988b9e87289b674a18087812",
-    "native_relationships_s": 0.7162943,
+    "native_relationships_s": 0.7248485,
     "nodes": 16273,
     "repositories": 23,
     "scope": "23 pinned repositories, final static artifact, production openEngine and C API DDL; full node/edge columns and existing F# enrichment; isolated database, full source row appenders, PGQ parity and reopen; no publication or production deployment",
     "source": "45f4fdf315",
     "trials": [
       {
-        "checkpoint_s": 0.003209,
-        "graph_creation_s": 0.3180892,
-        "load_s": 0.3069955,
+        "checkpoint_s": 0.0032277,
+        "graph_creation_s": 0.3183112,
+        "load_s": 0.2987669,
         "queries": [
           {
             "name": "outgoing",
             "parity": true,
             "rows": 5,
-            "seconds": 0.0188481
+            "seconds": 0.0189641
           },
           {
             "name": "incoming",
             "parity": true,
             "rows": 8,
-            "seconds": 0.0035415
+            "seconds": 0.0037413
           },
           {
             "name": "chunks",
             "parity": true,
             "rows": 2,
-            "seconds": 0.0032173
+            "seconds": 0.0031617
           }
         ],
         "reopen_parity": true,
@@ -201,27 +204,27 @@
         "workers": 1
       },
       {
-        "checkpoint_s": 0.0031286,
-        "graph_creation_s": 0.3139486,
-        "load_s": 0.344834,
+        "checkpoint_s": 0.0031724,
+        "graph_creation_s": 0.3148041,
+        "load_s": 0.3189622,
         "queries": [
           {
             "name": "outgoing",
             "parity": true,
             "rows": 5,
-            "seconds": 0.0044047
+            "seconds": 0.0042378
           },
           {
             "name": "incoming",
             "parity": true,
             "rows": 8,
-            "seconds": 0.0033329
+            "seconds": 0.0037368
           },
           {
             "name": "chunks",
             "parity": true,
             "rows": 2,
-            "seconds": 0.0032149
+            "seconds": 0.0033011
           }
         ],
         "reopen_parity": true,
@@ -230,27 +233,27 @@
         "workers": 1
       },
       {
-        "checkpoint_s": 0.0037175,
-        "graph_creation_s": 0.3201823,
-        "load_s": 0.2856263,
+        "checkpoint_s": 0.0028187,
+        "graph_creation_s": 0.3148869,
+        "load_s": 0.2726367,
         "queries": [
           {
             "name": "outgoing",
             "parity": true,
             "rows": 5,
-            "seconds": 0.0054917
+            "seconds": 0.0041834
           },
           {
             "name": "incoming",
             "parity": true,
             "rows": 8,
-            "seconds": 0.0060763
+            "seconds": 0.0034432
           },
           {
             "name": "chunks",
             "parity": true,
             "rows": 2,
-            "seconds": 0.0048234
+            "seconds": 0.0032275
           }
         ],
         "reopen_parity": true,
@@ -259,27 +262,27 @@
         "workers": 1
       },
       {
-        "checkpoint_s": 0.0029205,
-        "graph_creation_s": 0.3434974,
-        "load_s": 0.2358713,
+        "checkpoint_s": 0.0029479,
+        "graph_creation_s": 0.3444644,
+        "load_s": 0.2349998,
         "queries": [
           {
             "name": "outgoing",
             "parity": true,
             "rows": 5,
-            "seconds": 0.0041213
+            "seconds": 0.004785
           },
           {
             "name": "incoming",
             "parity": true,
             "rows": 8,
-            "seconds": 0.0037436
+            "seconds": 0.0039137
           },
           {
             "name": "chunks",
             "parity": true,
             "rows": 2,
-            "seconds": 0.003336
+            "seconds": 0.0039902
           }
         ],
         "reopen_parity": true,
@@ -288,27 +291,27 @@
         "workers": 4
       },
       {
-        "checkpoint_s": 0.0036466,
-        "graph_creation_s": 0.3561361,
-        "load_s": 0.2541222,
+        "checkpoint_s": 0.0027528,
+        "graph_creation_s": 0.3498756,
+        "load_s": 0.2326336,
         "queries": [
           {
             "name": "outgoing",
             "parity": true,
             "rows": 5,
-            "seconds": 0.0045179
+            "seconds": 0.0047147
           },
           {
             "name": "incoming",
             "parity": true,
             "rows": 8,
-            "seconds": 0.0038921
+            "seconds": 0.0052953
           },
           {
             "name": "chunks",
             "parity": true,
             "rows": 2,
-            "seconds": 0.0037447
+            "seconds": 0.0033466
           }
         ],
         "reopen_parity": true,
@@ -317,27 +320,27 @@
         "workers": 4
       },
       {
-        "checkpoint_s": 0.0028673,
-        "graph_creation_s": 0.3482618,
-        "load_s": 0.2321453,
+        "checkpoint_s": 0.0028409,
+        "graph_creation_s": 0.3435539,
+        "load_s": 0.2315644,
         "queries": [
           {
             "name": "outgoing",
             "parity": true,
             "rows": 5,
-            "seconds": 0.0044358
+            "seconds": 0.0044279
           },
           {
             "name": "incoming",
             "parity": true,
             "rows": 8,
-            "seconds": 0.003811
+            "seconds": 0.0036546
           },
           {
             "name": "chunks",
             "parity": true,
             "rows": 2,
-            "seconds": 0.0036932
+            "seconds": 0.0033743
           }
         ],
         "reopen_parity": true,
@@ -346,27 +349,27 @@
         "workers": 4
       },
       {
-        "checkpoint_s": 0.0032952,
-        "graph_creation_s": 0.3549063,
-        "load_s": 0.2465592,
+        "checkpoint_s": 0.0477697,
+        "graph_creation_s": 0.0129379,
+        "load_s": 0.5375002,
         "queries": [
           {
             "name": "outgoing",
             "parity": true,
             "rows": 5,
-            "seconds": 0.0042362
+            "seconds": 0.003968
           },
           {
             "name": "incoming",
             "parity": true,
             "rows": 8,
-            "seconds": 0.0037273
+            "seconds": 0.0036694
           },
           {
             "name": "chunks",
             "parity": true,
             "rows": 2,
-            "seconds": 0.0031889
+            "seconds": 0.0032606
           }
         ],
         "reopen_parity": true,
@@ -375,27 +378,27 @@
         "workers": 8
       },
       {
-        "checkpoint_s": 0.0036997,
-        "graph_creation_s": 0.3533212,
-        "load_s": 0.2479828,
+        "checkpoint_s": 0.0029924,
+        "graph_creation_s": 0.3634238,
+        "load_s": 0.2515787,
         "queries": [
           {
             "name": "outgoing",
             "parity": true,
             "rows": 5,
-            "seconds": 0.0044414
+            "seconds": 0.0040063
           },
           {
             "name": "incoming",
             "parity": true,
             "rows": 8,
-            "seconds": 0.0035619
+            "seconds": 0.0034507
           },
           {
             "name": "chunks",
             "parity": true,
             "rows": 2,
-            "seconds": 0.0032233
+            "seconds": 0.003378
           }
         ],
         "reopen_parity": true,
@@ -404,27 +407,27 @@
         "workers": 8
       },
       {
-        "checkpoint_s": 0.0029976,
-        "graph_creation_s": 0.3706577,
-        "load_s": 0.2426057,
+        "checkpoint_s": 0.0034961,
+        "graph_creation_s": 0.3710917,
+        "load_s": 0.2451573,
         "queries": [
           {
             "name": "outgoing",
             "parity": true,
             "rows": 5,
-            "seconds": 0.0046657
+            "seconds": 0.0040661
           },
           {
             "name": "incoming",
             "parity": true,
             "rows": 8,
-            "seconds": 0.0035569
+            "seconds": 0.003399
           },
           {
             "name": "chunks",
             "parity": true,
             "rows": 2,
-            "seconds": 0.0045084
+            "seconds": 0.003437
           }
         ],
         "reopen_parity": true,
@@ -433,6 +436,59 @@
         "workers": 8
       }
     ]
+  },
+  "service_capacity": {
+    "binary_sha256": "4a907777c23581daa8038c2ecf7461b09a0f2d2dd0dd0ab8d8d941161ddab9e4",
+    "cases": [
+      {
+        "name": "composer-outgoing",
+        "parity": true,
+        "rows": 5,
+        "seconds": 0.0190502
+      },
+      {
+        "name": "composer-incoming",
+        "parity": true,
+        "rows": 8,
+        "seconds": 0.0050018
+      },
+      {
+        "name": "composer-chunks",
+        "parity": true,
+        "rows": 2,
+        "seconds": 0.0067586
+      },
+      {
+        "name": "capability-shortest-two",
+        "parity": true,
+        "rows": 0,
+        "seconds": 0.0202975
+      },
+      {
+        "name": "composer-shortest-two",
+        "parity": true,
+        "rows": 819,
+        "seconds": 2.0755683,
+        "pages": 9
+      }
+    ],
+    "libduckdb_sha256": "0a90ff143d97da93014603b02ca298fcae01cf31988b9e87289b674a18087812",
+    "memory_events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+    "memory_max": "1610612736",
+    "memory_peak": "702267392",
+    "pids_events": "max 0",
+    "pids_max": "128",
+    "pids_peak": "34",
+    "scope": "Published HTTP server under 1,536 MiB memory and 128-task limits; isolated 23-repository fixture with synthetic observation freshness. No inference or live-corpus acceptance.",
+    "snapshot": "20a58ea9dc53d5b7384678b4e0efd59912f21a83e26df1083194e5e17e7a1dde",
+    "fixture": {
+      "repositories": 23,
+      "nodes": 16273,
+      "edges": 29458
+    },
+    "memory_peak_mib": 669.7,
+    "oracle": "One-hop queries match stored SQL adjacency; two-hop shortest distances match an independent F# breadth-first traversal. Source hydration preserves resource ownership.",
+    "receipt_sha256": "80fe6bbdaac05b944288cac73927902b68733a9aa78c9b25b2ebfff081fbcdad"
   },
   "extraction": [
     {
@@ -482,7 +538,7 @@
     }
   ],
   "module_open_prototype": {
-    "scope": "Separate SQL staging feasibility prototype, official2.0alpha49096. Projected module-open endpoint/line/rule parity only; not complete provenance-record parity or the production Enrich pass.",
+    "scope": "Separate SQL staging feasibility prototype, official 2.0 alpha49096. Projected module-open endpoint/line/rule parity only; not complete provenance-record parity or the production Enrich pass.",
     "matched_relationships": 4685,
     "sql_join_ms_range": "4\u20139",
     "fsharp_matcher_ms": 21,
@@ -604,6 +660,7 @@
   "measurement_host_sha256": {
     "graph-static.fsx": "23f027e094714394d5e2bb79d280634b8d0fee4ace4c4188dc391f97265dee62",
     "context-measure.fsx": "a9ed106e92b6cecd800651d573f2d7ab506a26a0b9808ae14ab6572dbc79098c",
-    "target-live-acceptance.fsx": "7d25d6d3bcca1dd8f4549c12d878c2b2f78b35ed92e4b4c8325120bc54524f66"
+    "target-live-acceptance.fsx": "7d25d6d3bcca1dd8f4549c12d878c2b2f78b35ed92e4b4c8325120bc54524f66",
+    "startup-capacity.fsx": "7a75dfddfcf101ca43d66683abdf81112317339597e893fefaa898e34d34fb62"
   }
 }

@@ -71,7 +71,8 @@ external-validator skips. Removing grammar activation, engine source checking,
 generation binding, renamed-target verification or the active-file lock guard
 each failed its intended test;
 the restored full suite passed. The lab packaging and rollback suite passed
-78 tests. The unchanged hook reconciler retains its 11-test accepted baseline.
+91 tests, including the legacy replacement suite discovered at this acceptance
+gate. The unchanged hook reconciler retains its 11-test accepted baseline.
 The deployed no-thinking profile separately passed 12/12 graph-correct responses
 without observed reasoning. Local engine acceptance and live deployment are
 distinct gates.
@@ -81,6 +82,25 @@ preflight, 25 query/probe tests and two coordinator tests, including native
 directory durability and rejected-target publication. The same native artifact
 passed 4,944 upstream SQL assertions in 73 cases in that environment. The full
 native suite on Z13 includes the separate-process active-file lock regression.
+
+The 25 query/probe cases also pass inside that Ubuntu userland under the API's
+1,536 MiB memory and 128-task limits (186 MiB peak in this run). Connection
+initialization bounds both DuckDB thread pools before opening the database.
+A control using the earlier executable hit the task ceiling at 80 MiB with no
+kernel memory-limit events; the corrected engine-only preflight used 42 MiB
+without a task-limit event. This tests resource initialization separately from
+corpus size or model inference.
+The rollout repeats this engine preflight on the guest under limits read from
+the candidate API unit, before it builds the side index or stops live services.
+
+A separate capacity gate ran the published HTTP server with those same limits
+against 23 pinned repositories: 16,273 nodes and 29,458 edges. Schema, seed
+discovery, source hydration and the three named-file graph operations passed.
+A nonempty two-hop shortest-path query returned 819 rows across nine bounded
+pages, matching an independent breadth-first traversal of the stored adjacency
+rows. The server peaked at 669.7 MiB and 34 tasks, with zero memory-limit, OOM
+or task-limit events. This isolated fixture used synthetic observation freshness;
+it verifies graph serving capacity, not inference or live-corpus acceptance.
 
 ## Context carried into the agent
 
