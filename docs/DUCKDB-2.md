@@ -129,8 +129,17 @@ SQL joining 0.407 and reading the result 0.017. These are nested measurements;
 adding them again would double-count work. The 1.755-second relationship phase
 and its 0.407-second join are not complete rebuild times. Generation starts
 from extracted components; ref observation, extraction and service activation
-are outside this table. A complete rebuild under the actual
-`retrieval-indexer.service` unit remains a pending capacity gate.
+are outside this table.
+
+The installed `retrieval-indexer.service` subsequently rebuilt all 24 repositories
+and published generation 2 with the same snapshot. The controlled check completed
+at 19:13:05 UTC in 29 seconds; its generation phases totalled 4.972 seconds.
+Peak memory reached 1,988,833,280 of 2,147,483,648 bytes (92.6%), with no
+limit/OOM events or restarts. This successful rebuild leaves narrow headroom.
+A local 1 GB DuckDB / 768 MiB GC profile passed generation from the 23 immutable
+components in 3.845 seconds at 1,577,525,248 bytes peak. That excludes extraction
+and coordinator work; the lower-memory profile still needs the complete
+installed-unit rebuild check.
 
 The full migration fixture contains 23 pinned repositories, 16,273 nodes,
 29,458 total edges and 10,760 derived edges across all relationship families.

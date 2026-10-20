@@ -55,10 +55,19 @@ builds the same graph under the indexer's 2,048 MiB / 128-task limits:
 That gate covers generation from 23 retained components, not extraction, the
 coordinator's own memory or the configured maximum source budget.
 
-These local candidate gates are distinct from the live-service measurements
-below. A complete rebuild under the actual `retrieval-indexer.service` unit
-remains a pending capacity gate; the rollout's side-index build does not establish
-that result. Broader TOML invalid-input validation and XML rejection
+At 19:13:05 UTC, a controlled check of the installed `retrieval-indexer.service`
+completed successfully: all 24 repositories were rebuilt and generation 2
+published the same accepted snapshot. The check took 29 seconds, with 4.972
+seconds in recorded generation phases. Peak memory was 1,897 MiB, **92.6% of
+the 2,048 MiB limit**, with 68 of 128 tasks, no limit/OOM events and no restarts.
+This establishes correctness and capacity for that rebuild, with narrow headroom.
+
+A subsequent local profile limited DuckDB to 1 GB and the GC heap to 768 MiB.
+Generation from the 23 immutable components passed in 3.845 seconds at 1,504 MiB
+peak. It excludes extraction and coordinator work; acceptance of that profile
+for the complete installed 24-repository rebuild remains pending.
+
+Broader TOML invalid-input validation and XML rejection
 semantics remain separate owning-library work, not conformance claims for this
 increment.
 The runtime queue acceptance has six lifecycle controls: shared computation
