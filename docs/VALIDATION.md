@@ -64,8 +64,19 @@ This establishes correctness and capacity for that rebuild, with narrow headroom
 
 A subsequent local profile limited DuckDB to 1 GB and the GC heap to 768 MiB.
 Generation from the 23 immutable components passed in 3.845 seconds at 1,504 MiB
-peak. It excludes extraction and coordinator work; acceptance of that profile
-for the complete installed 24-repository rebuild remains pending.
+peak, excluding extraction and coordinator work. The installed profile then
+rebuilt all 24 repositories by 20:36:05 UTC: generation 3 remained fresh at the
+same snapshot. The controlled check took 22 seconds, with 5.168 seconds in
+generation phases, 70 of 128 tasks, no limit/OOM events and no restarts.
+The subsequent HTTPS text smoke check returned the expected five outgoing
+relationships and four sources at fresh generation 3.
+Peak memory was 1,910,042,624 bytes (**88.94%**), 75.14 MiB below the earlier
+check. This passes correctness and capacity but misses the 85%-of-limit target;
+the retained profile has 11.06% headroom (**CAP-HEADROOM**). Growth beyond the
+current corpus and full rebuilds under concurrent inference remain untested;
+further tuning is a separate change. These single checks do not establish
+a speedup. The [installed-unit binding](DUCKDB-2.md#indexing-and-cross-linking-measurements)
+records the lab follow-up separately from the original deployment bundle.
 
 Broader TOML invalid-input validation and XML rejection
 semantics remain separate owning-library work, not conformance claims for this

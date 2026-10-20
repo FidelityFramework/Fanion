@@ -138,8 +138,21 @@ Peak memory reached 1,988,833,280 of 2,147,483,648 bytes (92.6%), with no
 limit/OOM events or restarts. This successful rebuild leaves narrow headroom.
 A local 1 GB DuckDB / 768 MiB GC profile passed generation from the 23 immutable
 components in 3.845 seconds at 1,577,525,248 bytes peak. That excludes extraction
-and coordinator work; the lower-memory profile still needs the complete
-installed-unit rebuild check.
+and coordinator work. The same budget then passed the installed-unit rebuild
+of all 24 repositories at 20:36:05 UTC, publishing fresh generation 3 at the
+same snapshot. Its 22-second controlled check recorded 5.168 seconds in
+generation phases, including 1.888 seconds for relationships and 0.477 seconds
+for the SQL join. Peak memory was 1,910,042,624 bytes (88.94%), with 70 of 128
+tasks, zero limit/OOM events and no restarts. The 75.14 MiB reduction leaves
+11.06% headroom, below the intended 15%; the profile is retained with that
+limitation. The 29- and 22-second single checks are not a controlled speed comparison.
+
+This budget change is a lab-owned follow-up (`speakez-lab` commit `38cde1f`).
+The installed indexer unit hashes to `398322f2…`; the original `f936a4cd…`
+bundle still contains the `dad8…` unit until rebundling includes that follow-up.
+The preserved and validated LXC compatibility drop-in (`fcbd512c…`) can override
+the unit's `NoNewPrivileges` setting, so the source unit alone does not establish
+effective hardening. Full installed hashes are retained in the numeric receipt.
 
 The full migration fixture contains 23 pinned repositories, 16,273 nodes,
 29,458 total edges and 10,760 derived edges across all relationship families.
