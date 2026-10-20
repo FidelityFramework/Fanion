@@ -91,17 +91,9 @@ and release activation.
 
 ## Documentation
 
-| Document | Purpose |
-| --- | --- |
-| [Architecture](docs/ARCHITECTURE.md) | Owners, pull evaluation, request and publication lifetimes |
-| [API](docs/ENGLISH-API.md) | Text requests, evidence, budgets and operator graph inspection |
-| [Corpus](docs/CORPUS.md) | Repository/ref selection, policy and scope |
-| [Extractor](docs/EXTRACTOR.md) | Committed source, classification, limits and provenance |
-| [Webhooks](docs/WEBHOOKS.md) | Push authentication, enrollment, reconciliation, publication and recovery |
-| [Operations](docs/OPERATIONS.md) | Build, engine pins, service configuration and deployment |
-| [Validation](docs/VALIDATION.md) | Test commands, correctness controls and measured full response times |
-| [DuckDB 2.0](docs/DUCKDB-2.md) | Paired native build, connection contract, publication and measured indexing |
-| [Query prompt](docs/PQL-PROMPT.md) | Supported graph language and worked examples |
+The [documentation guide](docs/README.md) links the architecture, API, corpus,
+webhook flow, operations, validation and engine contracts, with suggested
+starting points for clients and operators.
 
 The runtime and indexing receiver are here. The lab repository owns VM
 provisioning, Forgejo hook enrollment, nginx and agent installation. It consumes Fanion's source and
