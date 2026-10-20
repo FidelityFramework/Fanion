@@ -1043,12 +1043,194 @@
       }
     ],
     "full_field_parity": true,
-    "interpretation": "All node and edge fields, row order, metadata and canonical snapshot match. No end-to-end speedup: Fidelity.Data parsing is the next optimization target. Early trials overlapped test activity, so timings are diagnostic, not isolated benchmarks. Latest requests still wait for the complete publication fence.",
+    "interpretation": "All stored fields, provenance, row order, metadata and canonical snapshot match. The Fidelity.Data string-run fix removes the integration regression; no overall speedup over the pre-SQL implementation is established. Earlier unoptimized trials overlapped tests. Latest requests still wait for complete publication. Capacity covers the retained 23-component generation in Ubuntu24, excluding extraction and coordinator overhead; no live rollout is claimed.",
     "validation": {
       "fanion_passed": 152,
       "fanion_skipped": 2,
-      "fidelity_data_passed": 432,
+      "fidelity_data_passed": 444,
       "fidelity_data_ignored": 1
+    },
+    "fidelity_data_optimized_trials": [
+      {
+        "capabilities": 69,
+        "derived_edges": 10760,
+        "edges": 29458,
+        "nodes": 16273,
+        "phases": {
+          "checkpoint": 0.520947,
+          "components": 0.8241884,
+          "duckdb": 0.2230397,
+          "hash": 0.8372532,
+          "relationship_join": 0.2709091,
+          "relationship_read": 0.0212272,
+          "relationship_scan": 0.6799879,
+          "relationship_stage": 0.1285979,
+          "relationships": 1.2382471,
+          "validate": 0.0513708
+        },
+        "repeat": 1,
+        "snapshot": "20a58ea9dc53d5b7384678b4e0efd59912f21a83e26df1083194e5e17e7a1dde",
+        "total_seconds": 3.69681
+      },
+      {
+        "capabilities": 69,
+        "derived_edges": 10760,
+        "edges": 29458,
+        "nodes": 16273,
+        "phases": {
+          "checkpoint": 0.642813,
+          "components": 0.5845932,
+          "duckdb": 0.2125272,
+          "hash": 0.7775725,
+          "relationship_join": 0.3208526,
+          "relationship_read": 0.0119896,
+          "relationship_scan": 0.5198443,
+          "relationship_stage": 0.1272704,
+          "relationships": 1.0675916,
+          "validate": 0.0190018
+        },
+        "repeat": 2,
+        "snapshot": "20a58ea9dc53d5b7384678b4e0efd59912f21a83e26df1083194e5e17e7a1dde",
+        "total_seconds": 3.3044474
+      },
+      {
+        "capabilities": 69,
+        "derived_edges": 10760,
+        "edges": 29458,
+        "nodes": 16273,
+        "phases": {
+          "checkpoint": 0.5521895,
+          "components": 0.5780412,
+          "duckdb": 0.2051306,
+          "hash": 0.7909596,
+          "relationship_join": 0.2684698,
+          "relationship_read": 0.0103747,
+          "relationship_scan": 0.3707382,
+          "relationship_stage": 0.0983232,
+          "relationships": 0.837548,
+          "validate": 0.0186161
+        },
+        "repeat": 3,
+        "snapshot": "20a58ea9dc53d5b7384678b4e0efd59912f21a83e26df1083194e5e17e7a1dde",
+        "total_seconds": 2.9828078
+      }
+    ],
+    "fidelity_data_optimized_assembly_sha256": "d6984ca342eff1e8ebee2a607cc0f737b0e214a20239b9b7283e0a021b49a755",
+    "json_string_run_profile": {
+      "fixture_bytes": 27830269,
+      "fixture_sha256": "96e1107ab7c957d90558e115d6a92247ed387a5f2d07b695513aba65db7dedef",
+      "trials": 5,
+      "before_parser_median_ms": 2781.8470000000002,
+      "after_parser_median_ms": 215.11000000000001,
+      "before_parser_allocated_bytes": 5007520048,
+      "after_parser_allocated_bytes": 270374112,
+      "scope": "Same retained component, interleaved parsing and boundary checks; allocated bytes are cumulative allocations, not peak memory."
+    },
+    "indexer_generation_capacity": {
+      "scope": "Published generation CLI in existing Ubuntu24 userland; immutable 23-repository corpus; excludes extraction, coordinator publication and inference.",
+      "binary_sha256": "5740cffb45b220bf7e9c583aa9bcdc8881560f5d83e69f3bbca0898688325416",
+      "libduckdb_sha256": "0a90ff143d97da93014603b02ca298fcae01cf31988b9e87289b674a18087812",
+      "baseline_manifest_sha256": "1edb44b1f189d53d0714e195d885acfc86de15510987f854296969425c9f76de",
+      "exit_code": 0,
+      "binding_unchanged": true,
+      "budget_passed": true,
+      "canonical_snapshot_and_counts_match": true,
+      "memory_max": "2147483648",
+      "memory_peak": "1647366144",
+      "memory_events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0",
+      "tasks_max": "128",
+      "tasks_peak": "59",
+      "tasks_events": "max 0",
+      "wall_seconds": 3.331476,
+      "generation": {
+        "capability_nodes": 69,
+        "derived_edges": 10760,
+        "edges": 29458,
+        "nodes": 16273,
+        "phases": {
+          "checkpoint": 0.487,
+          "components": 0.906,
+          "duckdb": 0.214,
+          "hash": 0.436,
+          "relationship_join": 0.272,
+          "relationship_read": 0.021,
+          "relationship_scan": 0.573,
+          "relationship_stage": 0.157,
+          "relationships": 1.15,
+          "validate": 0.05
+        },
+        "snapshot_id": "20a58ea9dc53d5b7384678b4e0efd59912f21a83e26df1083194e5e17e7a1dde",
+        "stats": {
+          "accepted_by_layer": {
+            "architecture": {
+              "bytes": 500981,
+              "files": 32
+            },
+            "config": {
+              "bytes": 821748,
+              "files": 186
+            },
+            "decisions": {
+              "bytes": 39904,
+              "files": 1
+            },
+            "docs": {
+              "bytes": 10443456,
+              "files": 717
+            },
+            "examples": {
+              "bytes": 433742,
+              "files": 342
+            },
+            "guides": {
+              "bytes": 29573,
+              "files": 5
+            },
+            "implementation": {
+              "bytes": 21947330,
+              "files": 1453
+            },
+            "other": {
+              "bytes": 294895,
+              "files": 113
+            },
+            "research": {
+              "bytes": 211133,
+              "files": 8
+            },
+            "spec": {
+              "bytes": 1608311,
+              "files": 69
+            },
+            "tests": {
+              "bytes": 13308655,
+              "files": 1169
+            },
+            "tooling": {
+              "bytes": 936100,
+              "files": 72
+            }
+          },
+          "accepted_bytes": 50575828,
+          "accepted_files": 4167,
+          "accepted_selected_generated_bytes": 0,
+          "accepted_selected_generated_files": 0,
+          "candidate_bytes": 50631446,
+          "candidate_files": 4171,
+          "excluded_by_reason": {
+            "binary_content": 3,
+            "excluded_directory": 33,
+            "excluded_suffix": 609,
+            "non_regular_entry": 1,
+            "operational_config": 54,
+            "policy_scope": 5713,
+            "private_key_header": 1
+          },
+          "excluded_entries": 6414,
+          "tree_entries": 10581
+        },
+        "threads": 8
+      }
     }
   }
 }

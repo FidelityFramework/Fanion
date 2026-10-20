@@ -108,13 +108,16 @@ matching now expressed as SQL over temporary staging tables. The earlier
 
 The full migration fixture contains 23 pinned repositories, 16,273 nodes,
 29,458 total edges and 10,760 derived edges across all relationship families.
-Before the subsequent parser migration, both one-thread and eight-thread runs
-matched every stored column, row order, metadata and canonical snapshot hash.
-Complete generation took 2.85–3.70 seconds against 2.42–2.86 seconds in the
-previous implementation. SQL joining took about 250 ms; this is not an overall
-speedup. Parsing, hashing and the durable commit remain part of the queued
-generation interval. These measurements exclude source extraction and remote
-ref observation.
+Both one-thread and eight-thread runs of the SQL migration matched every stored
+column, row order, metadata and canonical snapshot hash. The subsequent
+Fidelity.Data integration preserves that parity. Its first parser implementation
+regressed generation to 11.8–15.2 seconds; fixing ordinary string-run parsing
+in Fidelity.Data brings the three candidate trials to 3.697, 3.304 and 2.983
+seconds. The previous pre-SQL implementation took 2.42–2.86 seconds, so this
+does not establish an overall speedup. SQL joining takes 268–321 ms in the
+latest trials. Parsing, hashing and the durable commit remain part of the
+queued generation interval. These measurements exclude source extraction and
+remote ref observation.
 
 The coordinator also avoids re-extracting unchanged declared dependents:
 verified structural components are reused, while cross-links are rebuilt over

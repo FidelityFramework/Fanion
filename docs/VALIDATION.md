@@ -32,17 +32,33 @@ The lab owns hook-registration tests alongside the administrative installer in
 It separately tests packaging, rollout rollback, MGR hook transport and Pi.
 
 The `src/` and `tests/` reorganization and Fidelity.Data migration passed 152
-Fanion tests with two retained external-validator skips. The owning TOML changes
-passed 432 Fidelity.Data tests with one existing ignored case. All fields,
+Fanion tests with two retained external-validator skips. The owning JSON/TOML changes
+passed 444 Fidelity.Data tests with one existing ignored case. All fields,
 row ordering, metadata and canonical identity of the 23-repository graph match
 the retained baseline in three trials.
 
-This is a source checkpoint. Complete generation currently takes 11.8–15.2 s
-after the parser migration; the component phase accounts for 8.2–9.3 s.
-An isolated 27.8 MB component allocates about 5 GB while parsing JSON strings.
-The existing duplicate-member check takes about 5 ms. Optimize the owning
-Fidelity.Data parser and repeat the target memory-capacity gate before rollout.
-These results do not change the accepted live-service measurements below.
+The first Fidelity.Data integration exposed per-character string allocations.
+The fix is in its existing XParsec parser: ordinary text is read in contiguous
+runs; escapes and surrogate pairs retain strict validation. On the same 27.8 MB
+component, median parsing fell from 2,782 to 215 ms and allocated bytes from
+5.01 GB to 270 MB. Removing either the Unicode or raw-control guard fails its
+regression test. The restored complete suite passes.
+TOML dotted inline tables also retain their implied-table representation through
+serialization; that regression failed before the owning serializer fix and
+passes afterward.
+
+Three complete generation trials now take 3.697, 3.304 and 2.983 seconds,
+with component parsing at 824, 585 and 578 ms. Every stored field and snapshot
+identity still matches. In Ubuntu 24.04 userland, the published executable
+builds the same graph under the indexer's 2,048 MiB / 128-task limits:
+1,571 MiB peak, 59 tasks, and no memory-limit, OOM or task-limit events.
+That gate covers generation from 23 retained components, not extraction, the
+coordinator's own memory or the configured maximum source budget.
+
+These are local candidate gates; they do not change the accepted live-service
+measurements below. Broader TOML invalid-input validation and XML rejection
+semantics remain separate owning-library work, not conformance claims for this
+increment.
 The runtime queue acceptance has six lifecycle controls: shared computation
 with independent cancellation; distinct requests respecting model capacity;
 publication waiting and rebind; physical cancellation drain; bounded retention;

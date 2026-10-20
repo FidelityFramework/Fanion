@@ -6,6 +6,17 @@ clones or copied repositories. Put scratch fixtures, receipts and logs in
 `tests/**/bin`, `tests/**/obj` and `.scratch/publish`.
 Keep credentials and corpus contents out of Git.
 
+Keep the standard solution layout: `Fanion.slnx`, `src/Fanion` and
+`tests/Fanion.Tests`. The service is .NET hosted; reserve "native" for the
+embedded engine or an actual native compilation target. Lab-specific enrollment
+and deployment belong in the lab repository.
+
+Use Fidelity.Data for data-format processing. Fix missing capabilities in its
+existing format owner instead of introducing a competing parser. Host primitives
+such as threading and I/O are a distinct concern; do not treat those dependencies
+as justification for bypassing Fidelity libraries. Preserve canonical identities
+and validate parser migrations against retained corpus evidence.
+
 Use the live retrieval schema to establish corpus coverage. For covered
 repositories require fresh/latest matching snapshot IDs, then use
 `find` → `pgq` → `sources`, pinned to that snapshot. Cite repository, revision,
