@@ -25,3 +25,16 @@ Fanion owns retrieval, the indexing receiver and corpus publication. The lab
 repository owns VM provisioning, Forgejo hook enrollment, nginx and agent
 installation. See the [project README](../README.md) for repository layout and
 build prerequisites.
+
+## Measurements
+
+The October 20, 2026 installed-service trials took **11.957 s, 24.767 s,
+11.508 s and 15.326 s** to re-index **1, 3, 5 and all 24 repositories**,
+respectively, without service restarts. The three-repository outlier is retained;
+its extra delay occurred almost entirely before the build began.
+
+See [measured re-indexing](VALIDATION.md#measured-re-indexing) for the nested
+stage breakdown, exact configuration, memory observations and post-build
+retrieval checks. These are current-head re-extractions, not changed-push
+latency measurements. The [corpus configuration](../config/corpus.framework.json)
+and [engine pins](../config/libduckdb-lock.json) identify the inputs.

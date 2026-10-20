@@ -99,6 +99,22 @@ bookends and exclusion of relationship children from their parent sum. These
 checks establish behavior and measurement structure; the four live reindex
 durations remain a separate operational measurement.
 
+That live sequence completed at 17:45:49 EDT (21:45:49 UTC) on October 20, 2026. All four
+current-head trials (1, 3, 5 and 24 sources) published consecutive generations
+with exact rebuilt/reused sets and unchanged service identities. The
+[measurement record](#measured-re-indexing) records every total and
+its nested stages, including the three-source scheduling outlier. It also
+records the later cumulative warm-process memory peak. This adds a warm-process
+observation to the earlier single-rebuild measurement; the two cover different
+conditions and neither replaces the other. Both miss the 85% target.
+All 18 post-deployment HTTPS text/provenance checks passed.
+
+The final watcher-recovery change passed 53 focused Serve/IndexState tests;
+removing host supervision failed both intended fault cases, and restoring it
+returned all 53 to green. Opus accepted the frozen runtime and release binding
+before deployment. The earlier complete suite remains retained evidence for
+the unchanged source closure.
+
 Broader TOML invalid-input validation and XML rejection
 semantics remain separate owning-library work, not conformance claims for this
 increment.
@@ -221,3 +237,112 @@ graph-located files, not a crawl of all configured repositories.
 
 The [DuckDB 2.0 contract](DUCKDB-2.md) records the engine measurements and
 their acceptance boundaries. Current production engine locks remain authoritative.
+
+## Measured re-indexing
+
+On October 20, 2026, the running service re-extracted **1, then 3, then 5,
+then all 24 repositories**, once each, without restarting either service.
+Each total runs from invalidation submission through observation of a fresh
+published generation. It includes the 250 ms debounce and scheduling; deployment,
+command startup, service checks and subsequent receipt delivery are outside it.
+
+| Re-extracted repositories | Unchanged components reused | Total elapsed |
+| --- | ---: | ---: |
+| Composer | 23 | **11.957 s** |
+| Composer, Clef, Alex | 21 | **24.767 s** |
+| Composer, Clef, Alex, Farscape, BAREWire | 19 | **11.508 s** |
+| All 24 configured repositories | 0 | **15.326 s** |
+
+These trials re-extracted the current commits and recomputed cross-links across
+the complete corpus. All four published the same graph content as consecutive
+generations. An identical active graph reused its earlier artifact verification;
+a new-commit push also includes webhook/ref discovery and may require verification
+of a newly created graph. These are four retained observations, not averages or
+a measurement of changed-push latency.
+
+The three-repository outlier is **not explained by a larger extraction**:
+fetch/extract took 1.485 s and the complete build took 10.991 s. Another 13.775 s
+elapsed outside that build interval, almost entirely before it began: the
+recorded build start was about 13.65 s after acceptance. The scheduler gives a
+due authoritative reconciliation priority over pending builds; that is a plausible source of the
+delay, but this receipt does not isolate it. The outlier is retained below.
+The final recheck of all repository heads also remains substantial: about
+5.2 s in each small rebuild and 1.99 s in the full rebuild.
+
+<details>
+<summary>Sequential build stages and included cross-linking times</summary>
+
+Indented timings are **inside their parent**, not additions to it. The six build
+stages partition build time. Cross-linking is one part of graph generation; the
+SQL join is one part of cross-linking. Figures are rounded to milliseconds.
+The interval outside the build includes admission, scheduling and publication
+observation; it is not a measurement of debounce alone.
+
+- **1 repository — 11.957 s total**
+  - Outside the build: 0.350 s.
+  - Build: 11.607 s.
+    - Prepare: 0.031 s.
+    - Fetch and extract: 1.239 s.
+    - Generate and checkpoint the complete graph: 5.071 s.
+      - Cross-linking: 1.890 s.
+        - SQL relationship join: 0.479 s.
+    - Verify and persist: 0.004 s.
+    - Recheck authoritative repository heads: 5.245 s.
+    - Publish: 0.016 s.
+- **3 repositories — 24.767 s total**
+  - Outside the build: 13.775 s.
+  - Build: 10.991 s.
+    - Prepare: 0.015 s.
+    - Fetch and extract: 1.485 s.
+    - Generate and checkpoint the complete graph: 4.246 s.
+      - Cross-linking: 1.665 s.
+        - SQL relationship join: 0.451 s.
+    - Verify and persist: 0.001 s.
+    - Recheck authoritative repository heads: 5.229 s.
+    - Publish: 0.016 s.
+- **5 repositories — 11.508 s total**
+  - Outside the build: 0.356 s.
+  - Build: 11.152 s.
+    - Prepare: 0.024 s.
+    - Fetch and extract: 1.687 s.
+    - Generate and checkpoint the complete graph: 4.189 s.
+      - Cross-linking: 1.524 s.
+        - SQL relationship join: 0.478 s.
+    - Verify and persist: 0.001 s.
+    - Recheck authoritative repository heads: 5.239 s.
+    - Publish: 0.013 s.
+- **24 repositories — 15.326 s total**
+  - Outside the build: 0.374 s.
+  - Build: 14.952 s.
+    - Prepare: 0.025 s.
+    - Fetch and extract: 8.658 s.
+    - Generate and checkpoint the complete graph: 4.264 s.
+      - Cross-linking: 1.605 s.
+        - SQL relationship join: 0.447 s.
+    - Verify and persist: 0.001 s.
+    - Recheck authoritative repository heads: 1.990 s.
+    - Publish: 0.015 s.
+
+Receipt delivery followed publication observation by 1–5 ms and is excluded
+from every total above.
+
+</details>
+
+The run used MGR's VM71, the [paired DuckDB/DuckPGQ engine](DUCKDB-2.md), a
+**2 GiB indexer limit**, **1 GB DuckDB allowance** and **768 MiB managed-heap cap**.
+Both services kept the same process and invocation identities throughout.
+The indexer's cumulative warm-process memory peak reached 2,010,824,704 bytes
+after the full run: **93.64% of its limit**, leaving **6.36% headroom**. This is
+one high-water mark across the ordered runs, not an isolated peak for each trial.
+
+Afterward, all **18 HTTPS text-to-JSON checks** passed against direct graph
+results and snapshot-bound source provenance. First measured responses took
+1.108–1.570 s, identical repeats 9–12 ms, and four callers sharing a new question
+1.075–1.495 s per caller. These response times are separate from re-indexing.
+
+The runtime source was `f03288b6f002cbf30cabc3ee2052ab48351942a4`, deployed as
+manifest `bba15c6b753983046bbf1ab82ca4cc4e24ae7e41930c6f8a8cffff7db3c41ab5`.
+The four generations, 2–5, shared snapshot
+`3a5d6bb56f160fdd1c260c6e308bcfbcf35fa61836393d5cc711062301a6630a`.
+The [measurement protocol](WEBHOOKS.md#measuring-a-reindex) describes the
+command and timing boundaries; earlier experiments are retained above.
