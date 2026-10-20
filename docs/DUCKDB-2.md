@@ -14,20 +14,33 @@ matching extension source. Build DuckPGQ at
 `45f4fdf3153c89cd38fdf6fb20b95646a466c5ac` and extension-ci-tools at
 `39ffc46ca8c70021d741c7be2e7bcadf3fd1c503`.
 
-In the upstream primary source checkout:
+Build inside an Ubuntu 24.04 userland with the primary source checkout mounted
+in place. The build environment is part of the lock: a matching source revision
+alone does not establish libc compatibility with the deployment guest.
+
+In that environment, from the upstream primary source checkout:
 
 ```bash
 git submodule update --init --recursive
-CMAKE_BUILD_PARALLEL_LEVEL=6 CC=clang CXX=clang++ \
-  make release GEN=ninja \
-  'EXT_RELEASE_FLAGS=-DBUILD_UNITTESTS=ON -DDISABLE_UNITY=ON -DSTATICALLY_LINK_EXTENSIONS="core_functions;json;parquet;icu;duckpgq"'
+CC=clang-18 CXX=clang++-18 cmake -G Ninja \
+  -DEXTENSION_STATIC_BUILD=1 -DCMAKE_CXX_STANDARD=17 \
+  -DDUCKDB_EXTENSION_CONFIGS="$PWD/extension_config.cmake" \
+  -DUNITTEST_ROOT_DIRECTORY="$PWD/" -DBENCHMARK_ROOT_DIRECTORY="$PWD/" \
+  -DENABLE_UNITTEST_CPP_TESTS=FALSE -DBUILD_EXTENSION_TEST_DEPS=default \
+  -DBUILD_UNITTESTS=ON -DDISABLE_UNITY=ON \
+  '-DSTATICALLY_LINK_EXTENSIONS=core_functions;json;parquet;icu;duckpgq' \
+  -DCMAKE_BUILD_TYPE=Release -S duckdb -B build/release-ubuntu24
+cmake --build build/release-ubuntu24 --config Release --parallel 6
 ```
 
-The artifact is `build/release/src/libduckdb.so`. Its accepted identity is the
+The artifact is `build/release-ubuntu24/src/libduckdb.so`. Its accepted identity is the
 lock digest, not a filename. Rebuilding with another toolchain can produce a
 new digest and requires its own acceptance. Keep all ordinary core extensions
 in the static list; linking only DuckPGQ leaves basic functions unavailable.
 
+Before building a corpus, deployment runs `retrieval-native probe --only engine`
+with the candidate locks inside the guest. It loads the actual library without
+corpus access or credentials, so missing runtime symbols fail before indexing.
 `Load.openEngine` owns every production connection. It verifies the artifact,
 process binding, runtime version/source, platform, built-in linkage and extension
 version. Automatic extension installation and loading are disabled. It then
@@ -86,30 +99,24 @@ provenance-record parity were outside that prototype. It is not a replacement
 for the production relationship pass.
 
 With the full production node/edge layout—16,273 nodes and 29,458 edges—three
-trials gave these medians in milliseconds. Both engines used the same direct-DDL
-measurement host; the 2.0 measurements here used the earlier dynamic paired build,
-whose distinct artifact hashes are retained in the receipt.
+trials through `Load.openEngine` on the locked Ubuntu-built artifact gave these
+medians in milliseconds. Loading includes every appender connection's artifact
+checks. Measurements ran on Z13 against 23 pinned local repository components.
 
-| Engine | Appenders | Load | Graph construction | Explicit checkpoint |
-| --- | ---: | ---: | ---: | ---: |
-| 1.5.4 | 1 | 230 | 118 | 10 |
-| 1.5.4 | 4 | 172 | 108 | 11 |
-| 1.5.4 | 8 | 200 | 109 | 11 |
-| 2.0 paired source | 1 | 281 | 315 | 3 |
-| 2.0 paired source | 4 | 175 | 343 | 3 |
-| 2.0 paired source | 8 | 186 | 362 | 4 |
+| Appenders | Load | Graph construction | Explicit checkpoint |
+| ---: | ---: | ---: | ---: |
+| 1 | 307 | 318 | 3.2 |
+| 4 | 236 | 348 | 2.9 |
+| 8 | 247 | 355 | 3.3 |
 
 Outgoing, incoming and chunk queries matched edge-table oracles, including after
 reopening. Four appenders helped loading; eight gave no consistent further gain.
-Graph construction was slower in this candidate. These results support source
-compatibility, not a general 2.0 speed claim. The unchanged extractor separately
+This establishes the tested workload, not a general 2.0 speed claim. The unchanged extractor separately
 scaled from 6.142 seconds at one processor to 1.902 at four and 1.564 at eight.
 
-The final static artifact was separately checked through the production
-`Load.openEngine` boundary. At one/four/eight appenders, load medians were
-311/245/249 ms and graph construction 326/352/378 ms; explicit checkpoints were
-about 3 ms. Those loads include each appender connection's artifact checks.
-All three graph query families matched their oracles before and after reopening.
+The parallel-loading fixture commits independent appenders inside an unpublished
+candidate. The production loader retains its single validated transaction;
+parallel staging needs the same complete-generation and publication guarantees.
 
 A SQL join for module-open matching took 4–9 ms versus about 21 ms for the F#
 matcher with already parsed facts. Appending the facts adds work, so these figures

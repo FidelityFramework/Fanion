@@ -66,15 +66,21 @@ This bounded check establishes those graph operations. Broader research
 questions can require two model completions and still need their own semantic
 acceptance cases. Grammar-valid JSON alone does not establish relevance.
 
-The paired 2.0 implementation passed 139 native tests, with two retained
+The paired 2.0 implementation passed 140 native tests, with two retained
 external-validator skips. Removing grammar activation, engine source checking,
 generation binding, renamed-target verification or the active-file lock guard
 each failed its intended test;
 the restored full suite passed. The lab packaging and rollback suite passed
-76 tests. The unchanged hook reconciler retains its 11-test accepted baseline.
+78 tests. The unchanged hook reconciler retains its 11-test accepted baseline.
 The deployed no-thinking profile separately passed 12/12 graph-correct responses
 without observed reasoning. Local engine acceptance and live deployment are
 distinct gates.
+
+The pinned Ubuntu 24.04 userland also passed the published executable's engine
+preflight, 25 query/probe tests and two coordinator tests, including native
+directory durability and rejected-target publication. The same native artifact
+passed 4,944 upstream SQL assertions in 73 cases in that environment. The full
+native suite on Z13 includes the separate-process active-file lock regression.
 
 ## Context carried into the agent
 

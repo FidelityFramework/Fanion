@@ -118,7 +118,7 @@ let private report (r: Generation.Report) =
 let main argv =
     try
         if argv.Length = 0 then
-            eprintfn "usage: retrieval-native serve --root DIR --config FILE --token-file FILE --prompt-file FILE [--webhook-secret-file FILE] [--host H --port P]\n       retrieval-native index --root DIR --config FILE [--once] [--remote-base URL] [--duckpgq-lock FILE --libduckdb-lock FILE]\n       retrieval-native fingerprint --config FILE [--duckpgq-lock FILE --libduckdb-lock FILE]\n       retrieval-native probe [--base-url http://127.0.0.1:8080] [--only resources] [--config FILE --marker FILE --token-file FILE --duckpgq-lock FILE --libduckdb-lock FILE]\n       retrieval-native schema --root DIR --config FILE --prompt-file FILE [--duckpgq-lock FILE --libduckdb-lock FILE]\n       retrieval-native extract <manifest.json> <component.json> [limits]\n       retrieval-native extract-components <batch.json> [limits]\n       retrieval-native relationships <snapshot.json> <output.json> [budgets]\n       retrieval-native load <snapshot.json> <output.duckdb> [--libduckdb-lock FILE --duckpgq-lock FILE --libduckdb PATH] [budgets]\n       retrieval-native generation <manifest.json> <output.duckdb> (same engine options)"
+            eprintfn "usage: retrieval-native serve --root DIR --config FILE --token-file FILE --prompt-file FILE [--webhook-secret-file FILE] [--host H --port P]\n       retrieval-native index --root DIR --config FILE [--once] [--remote-base URL] [--duckpgq-lock FILE --libduckdb-lock FILE]\n       retrieval-native fingerprint --config FILE [--duckpgq-lock FILE --libduckdb-lock FILE]\n       retrieval-native probe [--base-url http://127.0.0.1:8080] [--only resources|http|engine] [--config FILE --marker FILE --token-file FILE --duckpgq-lock FILE --libduckdb-lock FILE]\n       retrieval-native schema --root DIR --config FILE --prompt-file FILE [--duckpgq-lock FILE --libduckdb-lock FILE]\n       retrieval-native extract <manifest.json> <component.json> [limits]\n       retrieval-native extract-components <batch.json> [limits]\n       retrieval-native relationships <snapshot.json> <output.json> [budgets]\n       retrieval-native load <snapshot.json> <output.duckdb> [--libduckdb-lock FILE --duckpgq-lock FILE --libduckdb PATH] [budgets]\n       retrieval-native generation <manifest.json> <output.duckdb> (same engine options)"
             64
         else
             let argv = argv |> Array.collect (fun a -> if a = "--once" then [| "--once"; "true" |] else [| a |])
@@ -172,6 +172,11 @@ let main argv =
                 let locks = [ lockPath "--duckpgq-lock" "duckpgq-lock.json"; lockPath "--libduckdb-lock" "libduckdb-lock.json" ]
                 let sources, _ = Coordinator.configSources (args.Required "--config")
                 Console.Out.WriteLine(toText canonicalStyle (Obj [ "sha256", Str (Coordinator.extractionFingerprint sources locks) ]))
+                0
+            | "probe" when positional.Length = 0 && args.Text("--only", "") = "engine" ->
+                let configured = engine args
+                use connection = Load.openEngine configured ":memory:"
+                Console.Out.WriteLine(toText canonicalStyle (Load.engineIdentity configured))
                 0
             | "probe" when positional.Length = 0 ->
                 // Guest readiness probe (replaces guest_probe.py): fingerprint marker, allocated

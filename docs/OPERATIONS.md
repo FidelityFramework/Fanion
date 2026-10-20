@@ -28,6 +28,19 @@ Keep `libduckdb.so` beside the executable. The runtime verifies its digest and
 source identity; it performs no runtime extension download. See the
 [native-engine contract](DUCKDB-2.md) for the reproducible build and acceptance.
 
+Validate the executable and native library in the target userland before
+activation:
+
+```bash
+native/publish/retrieval-native probe --only engine \
+  --libduckdb native/publish/libduckdb.so \
+  --libduckdb-lock config/libduckdb-lock.json \
+  --duckpgq-lock config/duckpgq-lock.json
+```
+
+This uses an in-memory database and reads no corpus or credentials. Deployment
+performs this same check in the guest before constructing the side index.
+
 ## Configuration and startup
 
 The API and indexer use the same corpus, local state root and engine locks.

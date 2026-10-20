@@ -12,6 +12,20 @@ open Xunit
 open Retrieval.Native.Canonical
 open Retrieval.Native
 
+[<Fact>]
+let ``engine preflight loads the locked native artifact without corpus or credentials`` () =
+    match Environment.GetEnvironmentVariable "RETRIEVAL_TEST_LIBDUCKDB" with
+    | null | "" -> Assert.Skip "Verified native engine required"
+    | library ->
+        let config = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "../../config"))
+        let args = [| "probe"; "--only"; "engine"; "--libduckdb"; library
+                      "--libduckdb-lock"; Path.Combine(config, "libduckdb-lock.json")
+                      "--duckpgq-lock"; Path.Combine(config, "duckpgq-lock.json") |]
+        Assert.Equal(0, Program.main args)
+        let refused = Array.copy args
+        refused.[4] <- library + ".absent"
+        Assert.Equal(2, Program.main refused)
+
 let private snapshot = String('a', 64)
 
 let private good (identity: string) =
