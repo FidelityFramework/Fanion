@@ -43,21 +43,22 @@ publication waiting or allowed an obsolete result were all detected.
 
 ## Live full-response measurement
 
-On October 20, 2026, the accepted queue release
-`19be8e01853df2e11dc7a6db23a463c834bf0195c023aa927fd3a5cb89ddfc45`
+On October 20, 2026, the accepted paired DuckDB/DuckPGQ release
+`7cf3dfc0673f8bb4f805fb92a2ae32762e8734a72444c0afb6c00f4a0a521848`
 was exercised over HTTPS against the loaded Gemma E4B Q4 model on MGR's RTX
 3050. Thinking remained off with immediate nested GBNF. Timing includes the
-text request, service processing and complete JSON response.
+text request, service processing and complete JSON response. The engine is
+the pinned `v2.0.0-dev1` source build described in [DuckDB 2.0](DUCKDB-2.md).
 
 | Question about one named Composer file | First measured request | Identical repeat | Four callers sharing a new question |
 | --- | ---: | ---: | ---: |
-| Outgoing links | 1.635 s | 0.010 s | 1.196–1.200 s |
-| Incoming links | 1.133 s | 0.010 s | 0.918–0.926 s |
-| Source chunks | 1.194 s | 0.007 s | 0.948–0.954 s |
+| Outgoing links | 1.005 s | 0.008 s | 1.259–1.268 s |
+| Incoming links | 1.338 s | 0.010 s | 1.064–1.073 s |
+| Source chunks | 1.290 s | 0.008 s | 1.043–1.051 s |
 
 All 18 responses matched direct snapshot-pinned graph oracles, pagination and
 source provenance. The snapshot was
-`7f77abc7662170936bd639dda50a09733015f5d07ed23581e7594438b8759576`.
+`4e0641013249649bfcb1587f25fd62889ba61be5a66a11dff008df39cc97b832`.
 The target was `docs/PSG_Nanopass_Architecture.md` in
 `FidelityFramework/Composer`. The model was resident and startup priming had
 run; these are ordinary runtime requests, not model-loading measurements.
@@ -104,9 +105,12 @@ it verifies graph serving capacity, not inference or live-corpus acceptance.
 
 ## Context carried into the agent
 
-For the outgoing-links question above, a separate measured HTTPS request returned
+For the same outgoing-links question on the earlier accepted 1.5.4 release,
+a separate measured HTTPS request returned
 five oracle-checked relationships in 1.138 seconds and 8,162 UTF-8 bytes at
-14:26 UTC on October 20. The request specified a 4,000-character excerpt budget. Those
+14:26 UTC on October 20, at snapshot
+`7f77abc7662170936bd639dda50a09733015f5d07ed23581e7594438b8759576`.
+The request specified a 4,000-character excerpt budget. Those
 relationships identify four linked files across two repositories and a repository
 resource. Source hydration used 3,000 characters and explicitly omitted one
 target's excerpt; all five relationship rows were returned.

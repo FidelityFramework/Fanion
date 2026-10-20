@@ -2,8 +2,10 @@
 
 Fanion targets the paired source build recorded in its engine locks: DuckDB
 `v2.0.0-dev1`, source `45f4fdf315`, with built-in DuckPGQ `6b1d4b021d`.
-This is a pinned development build, not the final 2.0.0 release. The live service
-continues on its accepted engine until supervised deployment passes.
+This is a pinned development build, not the final 2.0.0 release. It was deployed
+on October 20, 2026, after the complete 24-repository corpus passed side-index
+validation. All 18 subsequent HTTPS text-to-JSON acceptance responses matched
+snapshot-pinned graph results and source provenance.
 
 ## Build and connection contract
 
@@ -41,6 +43,8 @@ in the static list; linking only DuckPGQ leaves basic functions unavailable.
 Before building a corpus, deployment runs `retrieval-native probe --only engine`
 with the candidate locks inside the guest. It loads the actual library without
 corpus access or credentials, so missing runtime symbols fail before indexing.
+The probe runs under the memory/task limits and GC policy declared by the
+candidate API unit, before either live service stops.
 `Load.openEngine` owns every production connection. It verifies the artifact,
 process binding, runtime version/source, platform, built-in linkage and extension
 version. Automatic extension installation and loading are disabled. It then

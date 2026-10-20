@@ -656,11 +656,82 @@
     "request_sha256": "42dff0220b876d09f2d4d81b5a34315ff3c86b5febfefeef42cbdfcd64b73a96",
     "response_sha256": "afee89fc414d9ea6aabb6627198edc2201e690bbf185bc32ba42fe92b33c6110"
   },
-  "deployment": "Pending supervised root rollout and complete HTTPS correctness/timing acceptance.",
+  "live_acceptance": {
+    "snapshot_id": "4e0641013249649bfcb1587f25fd62889ba61be5a66a11dff008df39cc97b832",
+    "scope": "Full HTTPS text question to complete JSON; fixed loaded Magnitude model/profile; direct graph correctness oracle",
+    "receipt_sha256": "29ab9fba29646d436535e779455dcd0ae464362b4945427b8871821aaaecc011",
+    "cases": [
+      {
+        "case": "outgoing",
+        "seconds": 1.0047342,
+        "repeat_seconds": 0.0081627,
+        "concurrent_seconds": [
+          1.2650197,
+          1.2590719,
+          1.2677204,
+          1.2615683
+        ],
+        "correct": true,
+        "rows": 5,
+        "source_records": 4,
+        "answer_sha256": "7a6d3a2bac6f123bb7a87a83359a4423073f5b5455afdd9b2dcd7ad5e3524992"
+      },
+      {
+        "case": "incoming",
+        "seconds": 1.3378764,
+        "repeat_seconds": 0.0100714,
+        "concurrent_seconds": [
+          1.0704096,
+          1.0635724,
+          1.0666747,
+          1.073117
+        ],
+        "correct": true,
+        "rows": 8,
+        "source_records": 4,
+        "answer_sha256": "244aac43f8bc17628bcc9c24e7ae7b6e2eecb32cc1133f2467a409e9c17476d6"
+      },
+      {
+        "case": "chunks",
+        "seconds": 1.2895522,
+        "repeat_seconds": 0.0076228,
+        "concurrent_seconds": [
+          1.0484361,
+          1.0431676,
+          1.0512466,
+          1.0454475
+        ],
+        "correct": true,
+        "rows": 2,
+        "source_records": 2,
+        "answer_sha256": "d1502d13427a4e5d068e120c3d24bf3d8925e20379103cd12718fd915207ae0c"
+      }
+    ]
+  },
+  "deployment": {
+    "status": "deployed",
+    "manifest_sha256": "7cf3dfc0673f8bb4f805fb92a2ae32762e8734a72444c0afb6c00f4a0a521848",
+    "ready": true,
+    "snapshot_id": "4e0641013249649bfcb1587f25fd62889ba61be5a66a11dff008df39cc97b832",
+    "repositories": 24,
+    "schema_find_sources_pgq": "passed",
+    "query_threads": 8,
+    "extractor_fingerprint": "1de73fc80c19145365f73188470c1e4682000c0a3b58a490701ebfe54f79376a",
+    "query_prompt_sha256": "977f12a7c48830619bb4042c46010b9c4df7cf75fe1ad1ac5c2fc83e4678cffa",
+    "fresh": true,
+    "english": {
+      "version": "fidelity-english-pgq-v8",
+      "configured": true,
+      "model": "gemma-4-e4b-it-qat:gguf:q4",
+      "response_format": "magnitude_gbnf"
+    },
+    "credentials_and_model_binding": "preserved",
+    "log_sha256": "0e1f85737acb3d32ed5708d88701334e2be04f70a3032117a3fba8f84e690a12"
+  },
   "measurement_host_sha256": {
     "graph-static.fsx": "23f027e094714394d5e2bb79d280634b8d0fee4ace4c4188dc391f97265dee62",
     "context-measure.fsx": "a9ed106e92b6cecd800651d573f2d7ab506a26a0b9808ae14ab6572dbc79098c",
-    "target-live-acceptance.fsx": "7d25d6d3bcca1dd8f4549c12d878c2b2f78b35ed92e4b4c8325120bc54524f66",
+    "target-live-acceptance.fsx": "69779998919bc27f786730a210ffcaacd6449ca1bcaabd6aaae84d809639448c",
     "startup-capacity.fsx": "7a75dfddfcf101ca43d66683abdf81112317339597e893fefaa898e34d34fb62"
   }
 }
