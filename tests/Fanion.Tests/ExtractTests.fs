@@ -189,6 +189,30 @@ let ``symlinks submodules binary generated large and secrets excluded`` () =
     Assert.DoesNotContain("SECRET=value", snapshot.Text)
 
 [<Fact>]
+let ``tracked build definitions retain policy without admitting build artifacts`` () =
+    use f = new Fixture()
+    let definitions = set [ "build/Boundary.targets"; "build/Contract.props"; "tools/build/Rules.targets" ]
+    let excluded =
+        set [ "build/Generated.fs"; "build/result.dll"; "build/notes.md"
+              "build/obj/Generated.targets"; "bin/build/Generated.props"; "vendor/build/ThirdParty.targets"
+              ".codex/build/Instructions.targets"; "build/.env.targets"; "build/id_rsa.props" ]
+    for path in Set.union definitions excluded do f.Write(path, "<Project />\n")
+    f.Write("build/Secret.targets", "-----BEGIN OPENSSH PRIVATE KEY-----\nprivate\n")
+    let manifest = f.Manifest(f.Commit())
+    let snapshot = build manifest
+    Assert.Equal<Set<string>>(definitions, snapshot.Paths)
+    Assert.Equal(4L, snapshot.Counter "candidate_files")
+    Assert.Equal(6L, snapshot.Reasons.["excluded_directory"])
+    Assert.Equal(1L, snapshot.Reasons.["operational_config"])
+    Assert.Equal(2L, snapshot.Reasons.["secret_filename"])
+    for path in definitions do
+        Assert.Equal("<Project />\n", str snapshot.Files.[path] "text")
+        Assert.Equal("config", str snapshot.Files.[path] "corpus_layer")
+    let scoped = build (manifest |> withField "policy" (raw """{"exclude_paths":["build/Boundary.targets"]}"""))
+    Assert.Equal<Set<string>>(Set.remove "build/Boundary.targets" definitions, scoped.Paths)
+    Assert.Equal(1L, scoped.Reasons.["policy_scope"])
+
+[<Fact>]
 let ``line chunks preserve crlf overlap and anchors`` () =
     use f = new Fixture()
     let text = String.Join("", [ for n in 1 .. 204 -> sprintf "line %d\r\n" n ]) + "line 205"
