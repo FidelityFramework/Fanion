@@ -311,6 +311,7 @@ let ``generated query runs real graph and returns exact context and citations`` 
         let id0, id1 = idOfPath store snapshot "0.md", idOfPath store snapshot "1.md"
         let model = RecordingModel(fixtureSettings, scripted [ plan; generatedFor id0 ], Some store)
         let body = success (askContext (service store (Some model)) question)
+        Assert.Equal(snapshot, text (field body "snapshot_id"))
         Assert.Equal(examples.[0], text (field body "query"))
         Assert.Equal(canon (Obj [ "seed", Str id0 ]), canon (field body "parameters"))
         Assert.Equal(id1, text (field (items (field body "results")).[0] "id"))
@@ -322,6 +323,8 @@ let ``generated query runs real graph and returns exact context and citations`` 
         Assert.Equal(2, context.Length)
         Assert.True(Encoding.UTF8.GetByteCount(jsonOf body) < 65536)
         for (sent, request, trace) in List.zip3 (List.ofSeq model.Calls) (List.ofSeq model.Requests) context do
+            Assert.DoesNotContain(snapshot, jsonOf sent)
+            Assert.False(has (parse (text (field (items sent).[1] "content"))) "snapshot_id")
             Assert.Equal(canon sent, canon (field trace "messages"))
             Assert.Equal(sha256Hex (toText orderedCompactStyle sent), text (field trace "sha256"))
             Assert.Equal(canon (Obj (("messages", field trace "messages") :: pairs (field trace "request_options"))), canon request)
@@ -343,7 +346,9 @@ let ``prompt does not call model or disclose internal configuration`` () =
         Assert.DoesNotContain(reference, text (field messages.[0] "content"))
         Assert.True(int' (field context.[0] "bytes") < int64 contextBytes)
         let user = parse (text (field messages.[1] "content"))
-        Assert.Equal(canon (Arr [ Obj [ "name", Str "docs"; "patterns", Arr [ Str "planning/*" ] ] ]), canon (path user [ "repository_layer_overrides"; "FidelityFramework/test" ]))
+        Assert.False(has user "classification_rules")
+        Assert.False(has user "repository_layer_overrides")
+        Assert.Contains("docs", stringsOf (field user "corpus_layers"))
         let rendered = jsonOf body
         for secret in [ fixtureSettings.BaseUrl; fixtureSettings.TokenFile.Value ] do Assert.DoesNotContain(secret, rendered))
 
@@ -626,7 +631,8 @@ let ``stable stage schema precedes question and candidates`` () =
             let context = parse content
             let index name = keys context |> List.findIndex ((=) name)
             Assert.True(index "request" > 0)
-            Assert.Equal(snapshot, text (field context "snapshot_id"))
+            Assert.False(has context "snapshot_id")
+            Assert.DoesNotContain(snapshot, content)
             Assert.Equal(fst questions, text (field context "request"))
             if stage = 1 then Assert.True(index "seed_lookups" > index "request")
             Assert.NotEqual<string>(text (field first "sha256"), text (field second "sha256")))
