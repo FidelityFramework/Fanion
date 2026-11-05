@@ -79,16 +79,52 @@ let private grammar (mode: string) (schema: SchemaContext option) (evidenceIds: 
         objectRule "query-response" "pgq-fields"
     | _ -> raise (ArgumentException "Unknown grammar mode")
     if mode <> "seed_discovery" then
-        rule "pgq-fields" "(fields-filtered | fields-plain | fields-shortest)"
-        for (variant, parameters) in [ "filtered", "parameters-filtered"; "plain", "parameters-plain"; "shortest", "parameters-plain" ] do
+        // English seed discovery returns only files and capabilities. Neither can
+        // originate a chunks_of edge: extraction emits chunk -> file. The general
+        // API accepts either direction without a line range because its seed may be a chunk.
+        let constrainedChunks = mode = "query_generation" && schema.IsSome && List.contains "chunks_of" kinds
+        let chunkRanges = List.contains "chunks_of" kinds && List.contains "line_start" fields && List.contains "line_end" fields
+        let rangeFields = if chunkRanges then "fields-chunks-range | " else ""
+        let otherKinds = kinds |> List.filter (fun k -> k <> "chunks_of")
+        if constrainedChunks then
+            let filtered = if otherKinds.IsEmpty then "fields-chunks" else "fields-chunks | fields-filtered-other"
+            rule "pgq-fields" ("(" + rangeFields + filtered + " | fields-self | fields-plain | fields-shortest)")
+            rule "fields-chunks" (memberOf "query" "query-chunks" + " " + comma + memberOf "parameters" "parameters-chunks")
+            if not otherKinds.IsEmpty then
+                rule "fields-filtered-other" (memberOf "query" "query-filtered" + " " + comma + memberOf "parameters" "parameters-filtered-other")
+                objectRule "parameters-filtered-other" (memberOf "seed" "seed" + " " + comma + memberOf "edge_kind" "edge-kind-other")
+                rule "edge-kind-other" (enum' otherKinds)
+        else
+            rule "pgq-fields" ("(" + rangeFields + "fields-filtered | fields-self | fields-plain | fields-shortest)")
+            rule "fields-filtered" (memberOf "query" "query-filtered" + " " + comma + memberOf "parameters" "parameters-filtered")
+        if chunkRanges then
+            rule "fields-chunks-range" (memberOf "query" "query-chunks-range" + " " + comma + memberOf "parameters" "parameters-chunks")
+        if constrainedChunks || chunkRanges then
+            objectRule "parameters-chunks" (memberOf "seed" "seed" + " " + comma + memberOf "edge_kind" (jsonLiteral (Str "chunks_of")))
+        for (variant, parameters) in [ "self", "parameters-plain"; "plain", "parameters-plain"; "shortest", "parameters-plain" ] do
             rule ("fields-" + variant) (memberOf "query" ("query-" + variant) + " " + comma + memberOf "parameters" parameters)
         objectRule "parameters-plain" (memberOf "seed" "seed")
-        objectRule "parameters-filtered" (memberOf "seed" "seed" + " " + comma + memberOf "edge_kind" "edge-kind")
+        if not constrainedChunks then
+            objectRule "parameters-filtered" (memberOf "seed" "seed" + " " + comma + memberOf "edge_kind" "edge-kind")
         let seedVertex = "(a:resource WHERE a.id = $seed)"
         let resultVertex = "(b:resource) COLUMNS ("
+        rule "query-self" (literal ("\"" + Fanion.Query.singleResourceQuery + "\""))
         for (variant, edge) in [ "filtered", "[e:relation WHERE e.kind = $edge_kind]"; "plain", "[e:relation]" ] do
             let patterns = [ sprintf "MATCH %s-%s->%s" seedVertex edge resultVertex; sprintf "MATCH %s<-%s-%s" seedVertex edge resultVertex ]
             rule ("query-" + variant) (literal "\"" + " (" + String.Join(" | ", patterns |> List.map literal) + ") node-columns edge-columns " + literal ")\"")
+        if chunkRanges then
+            let incomingRange = "\"MATCH " + seedVertex + "<-[e:relation WHERE e.kind = $edge_kind]-(b:resource WHERE b.line_start <= "
+            let rangeColumns = if constrainedChunks then "chunk-columns" else "node-columns"
+            rule "query-chunks-range" (literal incomingRange + " line-number " + literal " AND b.line_end >= " + " line-number " + literal ") COLUMNS (" + " " + rangeColumns + " edge-columns " + literal ")\"")
+            // Canonical decimal 1..Int32.MaxValue; ordering the pair remains a compiler check.
+            rule "line-number" "[1-9] [0-9]{0,8} | \"1\" [0-9]{9} | \"20\" [0-9]{8} | \"21\" [0-3] [0-9]{7} | \"214\" [0-6] [0-9]{6} | \"2147\" [0-3] [0-9]{5} | \"21474\" [0-7] [0-9]{4} | \"214748\" [0-2] [0-9]{3} | \"2147483\" [0-5] [0-9]{2} | \"21474836\" [0-3] [0-9] | \"214748364\" [0-7]"
+        if constrainedChunks then
+            let incoming = sprintf "MATCH %s<-[e:relation WHERE e.kind = $edge_kind]-%s" seedVertex resultVertex
+            rule "query-chunks" (literal "\"" + " " + literal incoming + " chunk-columns edge-columns " + literal ")\"")
+            let required = set [ "path"; "line_start"; "line_end" ]
+            rule "chunk-columns" (literal "b.id" + String.Join("", fields |> List.filter (fun f -> f <> "id") |> List.map (fun f ->
+                let column = " (" + literal (", b." + f) + ")"
+                if required.Contains f then column else column + "?")))
         rule "query-shortest" (literal ("\"MATCH p = ANY SHORTEST " + seedVertex + "-[e:relation]->{1,") + " [1-4] " + literal ("}" + resultVertex) + " node-columns (\", path_length(p)\")? " + literal ")\"")
         rule "node-columns" (literal "b.id" + String.Join("", fields |> List.filter (fun f -> f <> "id") |> List.map (fun f -> " (" + literal (", b." + f) + ")?")))
         rule "edge-columns" (String.Join(" ", edgeFields |> List.map (fun f -> "(" + literal (", e." + f) + ")?")))

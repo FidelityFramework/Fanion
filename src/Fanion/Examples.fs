@@ -19,9 +19,20 @@ let private planExamples : J list =
     [ Obj [ "request", Str "Which files link to docs/Architecture.md in Example/Compiler?"
             "decision", Str "Discover the named file first. Preserve the whole path and repository; no guessed layer filter."
             "output", Obj [ "lookups", Arr [ Obj [ "query", Str "docs/Architecture.md"; "repo", Str exampleRepo; "corpus_layer", Null ] ] ] ]
+      Obj [ "request", Str "In Example/Handbook, find the Owning Regions blog article and show its discussion of borrowing."
+            "decision", Str "The subject is the title Owning Regions. The words blog article describe its type and are not part of its title."
+            "output", Obj [ "lookups", Arr [ Obj [ "query", Str "Owning Regions"; "repo", Str otherRepo; "corpus_layer", Null ] ] ] ]
       Obj [ "request", Str "Find the design discussion of region ownership in Example/Compiler."
-            "decision", Str "Search a distinctive literal phrase. The request does not establish a corpus layer. This is substring discovery, not semantic search."
-            "output", Obj [ "lookups", Arr [ Obj [ "query", Str "region ownership"; "repo", Str exampleRepo; "corpus_layer", Null ] ] ] ]
+            "decision", Str "Search separate distinctive words: the combined phrase may not occur literally. The request does not establish a corpus layer."
+            "output", Obj [ "lookups", Arr [ Obj [ "query", Str "region"; "repo", Str exampleRepo; "corpus_layer", Null ]
+                                             Obj [ "query", Str "ownership"; "repo", Str exampleRepo; "corpus_layer", Null ] ] ] ]
+      Obj [ "request", Str "What does RegionOwnershipRules say about borrowing in Example/Compiler?"
+            "decision", Str "The named owner is a distinctive literal identifier. Search it without guessing a file path or layer."
+            "output", Obj [ "lookups", Arr [ Obj [ "query", Str "RegionOwnershipRules"; "repo", Str exampleRepo; "corpus_layer", Null ] ] ] ]
+      Obj [ "request", Str "Can eligibility facts grant executable bodies in Example/Compiler?"
+            "decision", Str "Use independent single-word literals; the full question may be phrased differently in the corpus."
+            "output", Obj [ "lookups", Arr [ Obj [ "query", Str "eligibility"; "repo", Str exampleRepo; "corpus_layer", Null ]
+                                             Obj [ "query", Str "executable"; "repo", Str exampleRepo; "corpus_layer", Null ] ] ] ]
       Obj [ "request", Str "What prevents foreign-call ownership details from leaking between the parser and emitter?"
             "decision", Str "Search separate literal technical terms. A combined string such as foreign-call ownership parser emitter is not a literal passage. No repository or layer is established by this question."
             "output", Obj [ "lookups", Arr [ Obj [ "query", Str "foreign-call"; "repo", Null; "corpus_layer", Null ]
@@ -45,6 +56,12 @@ let private queryExamples : J list =
       queryExample "Return the source chunks belonging to docs/Architecture.md in Example/Compiler, including their line ranges."
         "The discovered seed is a file. chunks_of points chunk -> file, so traverse incoming to return chunks with source spans."
         (oneHop true "b.id, b.path, b.kind, b.line_start, b.line_end, b.source_url, e.kind") (Some "chunks_of") main [ mention; main ]
+      queryExample "Show lines 1 through 2 of docs/Architecture.md in Example/Compiler."
+        "Retrieve only source chunks overlapping the requested lines. The upper bound goes with line_start and the lower bound with line_end."
+        "MATCH (a:resource WHERE a.id = $seed)<-[e:relation WHERE e.kind = $edge_kind]-(b:resource WHERE b.line_start <= 2 AND b.line_end >= 1) COLUMNS (b.id, b.path, b.line_start, b.line_end, b.source_url, e.kind)" (Some "chunks_of") main [ mention; main ]
+      queryExample "What does docs/Architecture.md in Example/Compiler say about region ownership? Show the source."
+        "This asks for the discovered file's content, not files that mention or link to it. Return the file itself so the server can hydrate its source."
+        Fanion.Query.singleResourceQuery None main [ mention; main ]
       queryExample "Which repository contains docs/Architecture.md in Example/Compiler?"
         "contains points repository -> file. From a file seed use incoming contains; b is the owning repository."
         (oneHop true "b.id, b.repo, b.path, b.kind, b.title, e.kind") (Some "contains") main [ mention; main ]

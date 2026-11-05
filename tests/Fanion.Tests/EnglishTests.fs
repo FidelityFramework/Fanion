@@ -226,6 +226,86 @@ let private resultPaths (context: J) = [ for lookup in items (field context "see
 // ------------------------------------------------------------ EnglishGraphTests
 
 [<Fact>]
+let ``empty graph result is returned without reversing or retrying`` () =
+    withCorpus standard (fun _ store snapshot ->
+        let seed = idOfPath store snapshot "0.md"
+        let query = "MATCH (a:resource WHERE a.id = $seed)<-[e:relation WHERE e.kind = $edge_kind]-(b:resource) COLUMNS (b.id, b.path, b.kind, e.kind)"
+        let generated = Obj [ "query", Str query; "parameters", Obj [ "seed", Str seed; "edge_kind", Str "links_to" ] ]
+        let model = RecordingModel(fixtureSettings, scripted [ plan; generated ], Some store)
+        let result = success (ask (service store (Some model)) "Which files link to 0.md?")
+        Assert.Empty(items (field result "results"))
+        Assert.Empty(items (field result "sources"))
+        Assert.Equal(2, model.Calls.Count))
+
+[<Theory>]
+[<InlineData(1, 100)>]
+[<InlineData(450, 460)>]
+[<InlineData(160, 165)>]
+[<InlineData(1000, 1100)>]
+let ``requested lines are selected by the graph query before pagination and hydration`` (first: int) (last: int) =
+    let content = String.concat "\n" [ for n in 1 .. 600 -> sprintf "line %03d" n ] + "\n"
+    withCorpus [ "test", [ "src/Main.fs", content ] ] (fun _ store snapshot ->
+        let seed = idOfPath store snapshot "src/Main.fs"
+        let query = sprintf "MATCH (a:resource WHERE a.id = $seed)<-[e:relation WHERE e.kind = $edge_kind]-(b:resource WHERE b.line_start <= %d AND b.line_end >= %d) COLUMNS (b.id, b.path, b.line_start, b.line_end, b.source_url, e.kind)" last first
+        let generated = Obj [ "query", Str query; "parameters", Obj [ "seed", Str seed; "edge_kind", Str "chunks_of" ] ]
+        let lookup = Obj [ "lookups", Arr [ Obj [ "query", Str "src/Main.fs"; "repo", Str "FidelityFramework/test"; "corpus_layer", Null ] ] ]
+        let model = RecordingModel(fixtureSettings, scripted [ lookup; generated ], Some store)
+        let result = success (ask (service store (Some model)) (sprintf "Show lines %d through %d of src/Main.fs in FidelityFramework/test" first last))
+        Assert.Equal(query, text (field result "query"))
+        let rows = items (field result "results")
+        let sources = items (field result "sources")
+        if first > 600 then
+            Assert.Empty rows
+            Assert.Empty sources
+        else
+            Assert.NotEmpty rows
+            Assert.NotEmpty sources
+            for row in rows @ sources do
+                Assert.Equal("src/Main.fs", text (field row "path"))
+                Assert.True(int' (field row "line_start") <= int64 last)
+                Assert.True(int' (field row "line_end") >= int64 first)
+            for source in sources do
+                Assert.True(int' (field source "excerpt_line_start") >= int64 first)
+                Assert.True(int' (field source "excerpt_line_end") <= int64 last)
+                Assert.NotEmpty(text (field source "text"))
+            Assert.True(sources |> List.exists (fun source -> (text (field source "text")).Contains(sprintf "line %03d" first)))
+        Assert.Equal(2, model.Calls.Count))
+
+[<Fact>]
+let ``graph engine can return a discovered file without traversing an edge`` () =
+    match environment () with
+    | None -> Assert.Skip "Set the verified graph engine paths"
+    | Some(extensions, libduckdb) ->
+        use corpus = new Corpus(standard, engineOf extensions libduckdb, extensions)
+        let snapshot = text (field (corpus.Publish()) "snapshot_id")
+        let database = Path.Combine(corpus.Root, "generations", snapshot + ".duckdb")
+        use connection = Fanion.Load.openEngine corpus.Engine database
+        use lookup = connection.CreateCommand()
+        lookup.CommandText <- "SELECT id FROM nodes WHERE path = 'src/Main.fs' AND kind = 'file'"
+        let seed = string (lookup.ExecuteScalar())
+        use command = connection.CreateCommand()
+        command.CommandText <- sprintf "SELECT * FROM GRAPH_TABLE(corpus MATCH (a:resource WHERE a.id = '%s') COLUMNS (a.id AS id))" seed
+        use reader = command.ExecuteReader()
+        Assert.True(reader.Read())
+        Assert.Equal(seed, reader.GetString 0)
+        Assert.False(reader.Read())
+
+[<Fact>]
+let ``a model-selected file is returned as source without inventing a relationship`` () =
+    withCorpus standard (fun corpus store snapshot ->
+        let seed = idOfPath store snapshot "src/Main.fs"
+        let lookup = Obj [ "lookups", Arr [ Obj [ "query", Str "src/Main.fs"; "repo", Str "FidelityFramework/test"; "corpus_layer", Null ] ] ]
+        let generated = Obj [ "query", Str singleResourceQuery; "parameters", Obj [ "seed", Str seed ] ]
+        let model = RecordingModel(fixtureSettings, scripted [ lookup; generated ], Some store)
+        let result = success (ask (service store (Some model)) "What does src/Main.fs say in FidelityFramework/test?")
+        Assert.Equal(seed, text (field (items (field result "results")).[0] "id"))
+        let source = (items (field result "sources")).[0]
+        Assert.Equal("src/Main.fs", text (field source "path"))
+        Assert.Equal(corpus.Head "test", text (field source "revision"))
+        Assert.Contains("unrelated implementation", text (field source "text"))
+        Assert.Equal(0L, int' (field result "sources_omitted")))
+
+[<Fact>]
 let ``generated query runs real graph and returns exact context and citations`` () =
     withCorpus standard (fun corpus store snapshot ->
         let id0, id1 = idOfPath store snapshot "0.md", idOfPath store snapshot "1.md"
@@ -468,22 +548,16 @@ let ``ranked unique basename resolves requested path without expansion`` () =
         Assert.Equal<string list>([ "docs/z-target.md" ], [ for row in items (field lookup "results") -> text (field row "path") ]))
 
 [<Fact>]
-let ``unique basename fallback records the expanded full path`` () =
-    // Real ranking variant of the Python mock: an exact-path decoy and three same-name files in
-    // earlier directories push docs/z-target.md beyond the four-row lookup, so the one permitted
-    // expansion must recover it by its full path.
+let ``truncated basename lookup fails without retrying the full path`` () =
+    // Four same-name files put the requested path outside the bounded first lookup.
     let decoys = [ "z-target.md", "Root decoy\n"; "a/z-target.md", "Decoy a\n"; "b/z-target.md", "Decoy b\n"; "c/z-target.md", "Decoy c\n" ]
-    withCorpus [ "test", mentionFiles "docs/z-target.md" 8 @ decoys ] (fun _ store snapshot ->
-        let target = idOfPath store snapshot "docs/z-target.md"
+    withCorpus [ "test", mentionFiles "docs/z-target.md" 8 @ decoys ] (fun _ store _ ->
         let plan = Obj [ "lookups", Arr [ Obj [ "query", Str "z-target.md"; "repo", Str "FidelityFramework/test"; "corpus_layer", Null ] ] ]
-        let model = RecordingModel(fixtureSettings, scripted [ plan; generatedFor target ], Some store)
-        let body = success (askContext (service store (Some model)) "Find files linked from docs/z-target.md.")
-        let lookup = (items (field (userContext (items (field body "context")).[1]) "seed_lookups")).[0]
-        Assert.Equal("z-target.md", text (path lookup [ "lookup"; "query" ]))
-        Assert.Equal("docs/z-target.md", text (path lookup [ "expanded_lookup"; "query" ]))
-        Assert.Equal(Int 50L, field lookup "lookup_limit")
-        Assert.Equal<string list>([ "docs/z-target.md" ], [ for row in items (field lookup "results") -> text (field row "path") ])
-        Assert.Equal(target, text (path body [ "parameters"; "seed" ])))
+        let model = RecordingModel(fixtureSettings, scripted [ plan ], Some store)
+        let english = service store (Some model)
+        Assert.Equal(("exact_seed_not_found", 422, false), failure (ask english "Find files linked from docs/z-target.md."))
+        Assert.Equal(1, model.Calls.Count)
+        Assert.Equal(0L, int' (path (english.Contract()) [ "limits"; "lookup_expansions" ])))
 
 [<Fact>]
 let ``ambiguous basename never guesses an expansion target`` () =

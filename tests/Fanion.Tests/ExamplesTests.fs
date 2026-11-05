@@ -36,7 +36,7 @@ let ``seed examples search literal passages rather than concatenated concepts`` 
 [<Fact>]
 let ``all query examples compile with the server`` () =
     let examples = worked "query_generation"
-    Assert.Equal(6, examples.Length)
+    Assert.Equal(8, examples.Length)
     for example in examples do
         let output = JsonInput.property "output" example
         let parameters = JsonInput.property "parameters" output
@@ -94,7 +94,7 @@ let ``queries retrieve the intended relationships not just valid syntax`` () =
               "nodes", Arr nodes
               "edges", Arr [ for (src, dst, kind) in relations -> Obj [ "src", Str (exampleId src); "dst", Str (exampleId dst); "kind", Str kind ] ] ]
     let signed, snapshotId = sign data
-    let expected = [ [ "linked" ]; [ "referring" ]; [ "chunk" ]; [ "compiler" ]; [ "linked"; "indirect" ]; [ "other-linked" ] ]
+    let expected = [ [ "linked" ]; [ "referring" ]; [ "chunk" ]; [ "chunk" ]; [ "architecture" ]; [ "compiler" ]; [ "linked"; "indirect" ]; [ "other-linked" ] ]
     let temp = Path.Combine(Path.GetTempPath(), "examples-graph-" + Guid.NewGuid().ToString("N"))
     Directory.CreateDirectory temp |> ignore
     try

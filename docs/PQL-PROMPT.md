@@ -79,6 +79,16 @@ silently substitute a mention. Report the missing seed if it remains absent.
 Below, substitute actual returned values: `S` = schema snapshot, `F` = selected
 file ID, `C` = selected chunk IDs. These placeholders are not literal arguments.
 
+**FILE** — return the discovered file itself as source evidence, without
+claiming a relationship:
+
+```text
+MATCH (a:resource WHERE a.id = $seed) COLUMNS (a.id)
+```
+
+Use `parameters:{"seed":F}` and hydrate the returned ID with `sources`.
+The source excerpt is bounded and may be truncated.
+
 **CHUNKS** — incoming parts of file F:
 
 ```text
@@ -179,6 +189,20 @@ input revisions/output identities. Otherwise report published state unverified
 and assign that bounded check; configuration is not a deployment receipt.
 
 ## Other supported paths and response handling
+
+For an explicit source line range, filter the incoming chunks in the graph:
+
+```text
+MATCH (a:resource WHERE a.id = $seed)<-[e:relation WHERE e.kind = $edge_kind]-(b:resource WHERE b.line_start <= 240 AND b.line_end >= 181) COLUMNS (b.id, b.path, b.line_start, b.line_end)
+```
+
+This selects chunks overlapping lines 181–240 before pagination. The parameters
+remain `seed:F` and `edge_kind:"chunks_of"`. Bounds must be positive Int32
+numbers with first ≤ last. Other predicates, edge kinds and directions are
+rejected for this form. Returned chunks keep their original source spans. For text requests, source
+excerpts begin within the query-selected range before applying character budgets;
+`excerpt_line_*` reports the text actually returned. A range beyond the file
+returns no chunks.
 
 For broad structural discovery across all edge kinds, the grammar also accepts:
 

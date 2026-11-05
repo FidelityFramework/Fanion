@@ -117,6 +117,75 @@ let ``identifiers are not sql strings`` () =
         queryError (fun () -> compilePgq examples.[0] (pgqParameters seed None) 20L 0L None |> ignore) |> ignore
 
 [<Fact>]
+let ``single-resource query accepts only an evidence seed and bounded window`` () =
+    let query = singleResourceQuery
+    Assert.Contains("a.id AS id", compilePgq query (pgqParameters (Str seed64) None) 20L 0L None)
+    for parameters in [ pgqParameters (Str "not-an-id") None; pgqParameters (Str seed64) (Some "links_to") ] do
+        queryError (fun () -> compilePgq query parameters 20L 0L None |> ignore) |> ignore
+    for changed in [ query + "; SELECT 1"; query.Replace("a.id)", "a.id, a.path)"); query.Replace("$seed", "'seed'") ] do
+        queryError (fun () -> compilePgq changed (pgqParameters (Str seed64) None) 20L 0L None |> ignore) |> ignore
+    queryError (fun () -> compilePgq query (pgqParameters (Str seed64) None) 0L 0L None |> ignore) |> ignore
+
+[<Fact>]
+let ``chunk line overlap is reconstructed from positive bounded literals`` () =
+    let parameters = pgqParameters (Str seed64) (Some "chunks_of")
+    for first, last in [ 1, 1; 181, 240; 1, Int32.MaxValue; Int32.MaxValue, Int32.MaxValue ] do
+        let predicate = sprintf " WHERE b.line_start <= %d AND b.line_end >= %d" last first
+        let query = examples.[1].Replace("(b:resource)", "(b:resource" + predicate + ")")
+        let sql = compilePgq query parameters 20L 0L None
+        Assert.Contains("<-[e:relation WHERE e.kind = 'chunks_of']-(b:resource" + predicate + ")", sql)
+        Assert.Contains("COLUMNS (b.id AS id, b.path AS path, b.kind AS kind)", sql)
+        Assert.DoesNotContain("$seed", sql)
+        Assert.DoesNotContain("$edge_kind", sql)
+        Assert.Equal<(int * int) option>(Some (first, last), queryLineRange query parameters)
+
+[<Fact>]
+let ``hydration range shares complete query validation`` () =
+    let parameters = pgqParameters (Str seed64) (Some "chunks_of")
+    Assert.Equal<(int * int) option>(None, queryLineRange examples.[1] parameters)
+    Assert.Equal<(int * int) option>(None, queryLineRange singleResourceQuery (pgqParameters (Str seed64) None))
+    let query = examples.[1].Replace("(b:resource)", "(b:resource WHERE b.line_start <= 240 AND b.line_end >= 181)")
+    for changed in [ query.Replace("b.id, ", ""); query.Replace("b.path", "b.secret"); query.Replace("<= 240", "<= 180"); query + "; SELECT 1" ] do
+        queryError (fun () -> queryLineRange changed parameters |> ignore) |> ignore
+    for invalid in [ { parameters with Extra = true }; pgqParameters (Str seed64) (Some "links_to"); pgqParameters (Str "invalid") (Some "chunks_of") ] do
+        queryError (fun () -> queryLineRange query invalid |> ignore) |> ignore
+
+[<Fact>]
+let ``chunk line overlap rejects malformed bounds and arbitrary predicates`` () =
+    let parameters = pgqParameters (Str seed64) (Some "chunks_of")
+    let query predicate = examples.[1].Replace("(b:resource)", "(b:resource WHERE " + predicate + ")")
+    for invalid in [ "0"; "-1"; "+1"; "01"; "2147483648"; "9999999999999999999999999"; "1.5"; "1e2"; "'181'"; "$first"; "1 OR TRUE" ] do
+        for predicate in [ "b.line_start <= " + invalid + " AND b.line_end >= 1"
+                           "b.line_start <= 2147483647 AND b.line_end >= " + invalid ] do
+            queryError (fun () -> compilePgq (query predicate) parameters 20L 0L None |> ignore) |> ignore
+    for predicate in [ "b.line_start <= 180 AND b.line_end >= 181"
+                       "b.line_start <= 240 OR b.line_end >= 181"
+                       "b.line_start <= 240 AND b.line_end >= 181 OR TRUE"
+                       "b.line_start <= 240 AND b.line_end >= 181; SELECT 1"
+                       "b.line_start <= 240"
+                       "b.line_end >= 181 AND b.line_start <= 240"
+                       "b.line_start < 240 AND b.line_end > 181"
+                       "b.path = 'secret'"
+                       "b.line_start <= 240 AND b.line_end >= 181 /* comment */" ] do
+        queryError (fun () -> compilePgq (query predicate) parameters 20L 0L None |> ignore) |> ignore
+
+[<Fact>]
+let ``chunk line overlap requires an incoming filtered one-hop traversal`` () =
+    let query = examples.[1].Replace("(b:resource)", "(b:resource WHERE b.line_start <= 240 AND b.line_end >= 181)")
+    let parameters = pgqParameters (Str seed64) (Some "chunks_of")
+    for changed in [ query.Replace(")<-[", ")-[").Replace("]-(", "]->(")
+                     query.Replace("]-(", "]-{1,2}(")
+                     query.Replace("MATCH ", "MATCH p = ANY SHORTEST ").Replace("]-(", "]-{1,2}(")
+                     query.Replace("(b:resource", "(c:resource)-[e:relation]->(b:resource")
+                     query.Replace("b.path", "b.secret")
+                     query.Replace("b.path", "b.id") ] do
+        queryError (fun () -> compilePgq changed parameters 20L 0L None |> ignore) |> ignore
+    for kind in [ "links_to"; "contains" ] do
+        queryError (fun () -> compilePgq query (pgqParameters (Str seed64) (Some kind)) 20L 0L None |> ignore) |> ignore
+    queryError (fun () -> compilePgq (query.Replace(" WHERE e.kind = $edge_kind", "")) (pgqParameters (Str seed64) None) 20L 0L None |> ignore) |> ignore
+    queryError (fun () -> compilePgq query { parameters with Extra = true } 20L 0L None |> ignore) |> ignore
+
+[<Fact>]
 let ``provenance is only a fixed one-hop projection`` () =
     let query = examples.[0].Replace("e.kind)", "e.kind, e.confidence, e.explanation)")
     Assert.Contains("e.confidence AS confidence", compilePgq query (pgqParameters (Str seed64) None) 10L 0L None)
@@ -425,6 +494,47 @@ let ``persisted graph schema bound paths and sources`` () =
     Assert.Equal("Content ", str' sources.[0] "text")
     Assert.True(bool' sources.[0] "truncated")
     Assert.Equal(g.Revision, str' sources.[0] "revision")
+
+[<Fact>]
+let ``source ranges preserve indexed spans and clip before the Unicode budget`` () =
+    use g = new Graph(requireEngine ())
+    let content = "prefix\r\n😀é\r\nβeta\n\nlast\r\nend"
+    let node =
+        update (nodes g.Data).[0] [ "kind", Str "chunk"; "line_start", Int 91L; "line_end", Int 96L; "text", Str content
+                                    "source_url", Str (sprintf "https://forge.example/test/src/commit/%s/0.md#L91-L96" g.Revision) ]
+    g.Publish(set' g.Data "nodes" (Arr (nodes g.Data |> replaceAt 0 node)))
+    let source range budget =
+        (items (get (g.Store.Sources([ g.Ids.[0] ], g.Snapshot, budget, lineRange = range)) "sources")).[0]
+    for range, expected, first, last in [ (92, 93), "😀é\r\nβeta\n", 92L, 93L;
+                                        (94, 94), "\n", 94L, 94L;
+                                        (95, 100), "last\r\nend", 95L, 96L;
+                                        (1, 92), "prefix\r\n😀é\r\n", 91L, 92L ] do
+        let row = source range 8000L
+        Assert.Equal(expected, str' row "text")
+        Assert.Equal(91L, int' row "line_start")
+        Assert.Equal(96L, int' row "line_end")
+        Assert.Equal(first, int' row "excerpt_line_start")
+        Assert.Equal(last, int' row "excerpt_line_end")
+        Assert.True(bool' row "truncated")
+    for budget, expected, last in [ 1L, "😀", 92L; 2L, "😀é", 92L; 3L, "😀é\r", 92L; 4L, "😀é\r\n", 92L; 5L, "😀é\r\nβ", 93L ] do
+        let row = source (92, 96) budget
+        Assert.Equal(expected, str' row "text")
+        Assert.Equal(92L, int' row "excerpt_line_start")
+        Assert.Equal(last, int' row "excerpt_line_end")
+        Assert.True(bool' row "truncated")
+    let whole = source (1, Int32.MaxValue) 8000L
+    Assert.Equal(content, str' whole "text")
+    Assert.False(bool' whole "truncated")
+    for range in [ (1, 90); (97, 100) ] do
+        let row = source range 8000L
+        Assert.Equal("", str' row "text")
+        Assert.Equal(Null, get row "excerpt_line_end")
+        Assert.True(bool' row "truncated")
+    let rows = items (get (g.Store.Sources([ g.Ids.[1]; g.Ids.[0] ], g.Snapshot, 1L, lineRange = (92, 93))) "sources")
+    Assert.Equal("", str' rows.[0] "text")
+    Assert.Equal("😀", str' rows.[1] "text")
+    for range in [ (0, 1); (-1, 1); (2, 1); (1, 0) ] do
+        queryError (fun () -> source range 8000L |> ignore) |> ignore
 
 [<Fact>]
 let ``find snapshot paging and external access`` () =

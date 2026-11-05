@@ -44,7 +44,34 @@ let nativeCorpus () : Group list =
     let find = Obj [ "action", Str "find"; "query", Str "docs/Architecture.md"; "snapshot_id", Str SNAPSHOT ]
     let sources = Obj [ "action", Str "sources"; "ids", Arr [ Str SEED ]; "snapshot_id", Str SNAPSHOT ]
     let pgq = Obj [ "action", Str "pgq"; "query", Str PLAIN; "parameters", seedOnly; "snapshot_id", Str SNAPSHOT ]
+    let rangeCases (cases: ResizeArray<Case>) (wrap: J -> J) =
+        let range first last = "MATCH (a:resource WHERE a.id = $seed)<-[e:relation WHERE e.kind = $edge_kind]-(b:resource WHERE b.line_start <= " + last + " AND b.line_end >= " + first + ") COLUMNS (b.id, b.path, b.line_start, b.line_end, e.kind)"
+        let request query kind = wrap (Obj [ "query", Str query; "parameters", Obj [ "seed", Str SEED; "edge_kind", Str kind ] ])
+        for value in [ "1"; "9"; "10"; "999999999"; "1000000000"; "2000000000"; "2100000000"; "2140000000"; "2147000000"; "2147400000"; "2147480000"; "2147483000"; "2147483600"; "2147483640"; "2147483647" ] do
+            add cases ("chunk-range-boundary-" + value) (request (range value value) "chunks_of") true
+        add cases "chunk-range-full-int32" (request (range "1" "2147483647") "chunks_of") true
+        for value in [ "0"; "-1"; "+1"; "01"; "2147483648"; "2147483650"; "2147483700"; "2147484000"; "2147490000"; "2147500000"; "2148000000"; "2150000000"; "2200000000"; "3000000000"; "99999999999"; "1.5"; "1e2"; "'1'"; "$first" ] do
+            add cases ("chunk-range-last-invalid-" + value) (request (range "1" value) "chunks_of") false
+            add cases ("chunk-range-first-invalid-" + value) (request (range value "2147483647") "chunks_of") false
+        let query = range "181" "240"
+        add cases "chunk-range-overlap" (request query "chunks_of") true
+        add cases "chunk-range-wrong-edge" (request query "links_to") false
+        for name, changed in [ "outgoing", query.Replace(")<-[", ")-[").Replace("]-(", "]->(")
+                               "multihop", query.Replace("]-(", "]-{1,2}(")
+                               "shortest", query.Replace("MATCH ", "MATCH p = ANY SHORTEST ")
+                               "arbitrary-where", query.Replace(" AND b.line_end >= 181", " OR TRUE")
+                               "sql-suffix", query + "; SELECT 1"
+                               "operator", query.Replace("b.line_start <=", "b.line_start <")
+                               "missing-bound", query.Replace(" AND b.line_end >= 181", "") ] do
+            add cases ("chunk-range-" + name) (request changed "chunks_of") false
+        let plain = query.Replace(" WHERE e.kind = $edge_kind", "")
+        add cases "chunk-range-unfiltered" (wrap (Obj [ "query", Str plain; "parameters", seedOnly ])) false
+    let asApi value =
+        match value with
+        | Obj fields -> Obj ([ "action", Str "pgq" ] @ fields @ [ "snapshot_id", Str SNAPSHOT ])
+        | _ -> failwith "expected request object"
     group "api-static" (buildApiGrammar None None) (fun api ->
+        rangeCases api asApi
         add api "schema" (Obj [ "action", Str "schema" ]) true
         add api "extra-member" (Obj [ "action", Str "schema"; "sql", Str "SELECT 1" ]) false
         add api "find" find true
@@ -57,7 +84,8 @@ let nativeCorpus () : Group list =
         addRaw api "literal-newline-in-string" (rawFind.Replace("docs/Architecture.md", "bad\nline")) false
         addRaw api "escaped-newline" (rawFind.Replace("docs/Architecture.md", @"good\nline")) true
         // Canonical generator emits non-BMP text directly instead of surrogate escapes.
-        addRaw api "escaped-surrogate-pair" (rawFind.Replace("docs/Architecture.md", @"🐦")) false
+        addRaw api "escaped-surrogate-pair" (rawFind.Replace("docs/Architecture.md", @"\ud83d\udc26")) false
+        addRaw api "literal-nonbmp" (rawFind.Replace("docs/Architecture.md", "🐦")) true
         for escape in [ @"\ud800"; @"\udfff" ] do
             addRaw api ("lone-surrogate-" + escape) (rawFind.Replace("docs/Architecture.md", escape)) false
         add api "unknown-repo" (set' find "repo" (Str "other/repo")) false
@@ -77,17 +105,28 @@ let nativeCorpus () : Group list =
         addRaw api "duplicate-member" (rawFind.Substring(0, rawFind.Length - 1) + ", \"query\":\"other\"}") false
         addRaw api "code-fence" ("```json\n" + rawFind + "\n```") false)
     group "api-bound" (buildApiGrammar (Some schema) (Some [ SEED ])) (fun bound ->
+        rangeCases bound asApi
         add bound "current-snapshot" find true
         add bound "stale-snapshot" (set' find "snapshot_id" (Str (rev 'e' 64))) false
         add bound "returned-id" sources true
         add bound "unknown-id" (set' sources "ids" (Arr [ Str (rev 'b' 64) ])) false
         add bound "other-static-repo" (set' find "repo" (Str "FidelityFramework/clef")) false
-        add bound "other-static-layer" (set' find "corpus_layer" (Str "tests")) false)
+        add bound "other-static-layer" (set' find "corpus_layer" (Str "tests")) false
+        let outgoingChunks = Obj [ "action", Str "pgq"; "query", Str FILTERED; "parameters", Obj [ "seed", Str SEED; "edge_kind", Str "chunks_of" ]; "snapshot_id", Str SNAPSHOT ]
+        add bound "chunk-seed-may-traverse-outgoing" outgoingChunks true
+        add bound "single-resource" (Obj [ "action", Str "pgq"; "query", Str Fanion.Query.singleResourceQuery; "parameters", seedOnly; "snapshot_id", Str SNAPSHOT ]) true)
     group "query-generation" (buildStageGrammar "query_generation" (Some schema) [ SEED ]) (fun query ->
+        rangeCases query id
         [ PLAIN; FILTERED; SHORTEST ] |> List.iteri (fun index pattern ->
             add query ("valid-pattern-" + string index) (Obj [ "query", Str pattern; "parameters", parametersFor pattern ]) true)
+        add query "single-resource-source" (Obj [ "query", Str Fanion.Query.singleResourceQuery; "parameters", seedOnly ]) true
+        add query "single-resource-cannot-name-edge" (Obj [ "query", Str Fanion.Query.singleResourceQuery; "parameters", Obj [ "seed", Str SEED; "edge_kind", Str "links_to" ] ]) false
         let incoming = FILTERED.Replace(")-[", ")<-[").Replace("]->(", "]-(")
-        add query "incoming-filtered" (Obj [ "query", Str incoming; "parameters", Obj [ "seed", Str SEED; "edge_kind", Str "chunks_of" ] ]) true
+        let incomingChunks = incoming.Replace("b.kind, e.kind", "b.kind, b.line_start, b.line_end, e.kind")
+        add query "incoming-filtered" (Obj [ "query", Str incomingChunks; "parameters", Obj [ "seed", Str SEED; "edge_kind", Str "chunks_of" ] ]) true
+        add query "outgoing-chunks-from-discovered-seed" (Obj [ "query", Str (incomingChunks.Replace(")<-[", ")-[").Replace("]-(", "]->(")); "parameters", Obj [ "seed", Str SEED; "edge_kind", Str "chunks_of" ] ]) false
+        add query "chunks-without-line-spans" (Obj [ "query", Str incoming; "parameters", Obj [ "seed", Str SEED; "edge_kind", Str "chunks_of" ] ]) false
+        add query "incoming-other-relation" (Obj [ "query", Str incoming; "parameters", Obj [ "seed", Str SEED; "edge_kind", Str "links_to" ] ]) true
         add query "incoming-plain" (Obj [ "query", Str (incoming.Replace(" WHERE e.kind = $edge_kind", "")); "parameters", seedOnly ]) true
         let allColumns = String.Join(", ", nodeFields |> List.map (fun f -> "b." + f))
         add query "all-columns" (Obj [ "query", Str (PLAIN.Substring(0, PLAIN.IndexOf "COLUMNS") + "COLUMNS (" + allColumns + ", e.kind)"); "parameters", seedOnly ]) true
@@ -129,7 +168,11 @@ let nativeCorpus () : Group list =
         add provenance "all-provenance" (Obj [ "query", Str allProvenance; "parameters", seedOnly ]) true
         add provenance "incoming-provenance" (Obj [ "query", Str (allProvenance.Replace(")-[", ")<-[").Replace("]->(", "]-(")); "parameters", seedOnly ]) true
         for kind in edgeKinds do
-            add provenance ("filtered-" + kind) (Obj [ "query", Str (FILTERED.Replace("e.kind)", edgeColumns + ")")); "parameters", Obj [ "seed", Str SEED; "edge_kind", Str kind ] ]) true
+            let query = FILTERED.Replace("e.kind)", edgeColumns + ")")
+            let query =
+                if kind = "chunks_of" then query.Replace(")-[", ")<-[").Replace("]->(", "]-(").Replace("b.kind, e.kind", "b.kind, b.line_start, b.line_end, e.kind")
+                else query
+            add provenance ("filtered-" + kind) (Obj [ "query", Str query; "parameters", Obj [ "seed", Str SEED; "edge_kind", Str kind ] ]) true
         for (name, pattern) in [ "reordered-properties", PLAIN.Replace("e.kind)", "e.confidence, e.basis)")
                                  "duplicate-property", PLAIN.Replace("e.kind)", "e.kind, e.basis, e.basis)")
                                  "unknown-property", PLAIN.Replace("e.kind)", "e.password)")
@@ -187,6 +230,39 @@ let ``static artifact matches generator`` () =
     let artifact name = File.ReadAllText(Path.Combine(sourceRoot, "grammars", name))
     Assert.Equal(artifact "retrieval-api.gbnf", buildApiGrammar None None)
     Assert.Equal(artifact "pgq-query.gbnf", staticGrammar "query_generation")
+
+[<Fact>]
+let ``model grammar binds chunks to incoming traversal and source ranges`` () =
+    let grammar = buildStageGrammar "query_generation" (Some schema) [ SEED ]
+    let line name = grammar.Split('\n') |> Array.find (fun s -> s.StartsWith(name + " ::="))
+    Assert.Contains("fields-chunks", line "pgq-fields")
+    Assert.Contains("query-chunks", line "fields-chunks")
+    Assert.Contains("parameters-chunks", line "fields-chunks")
+    Assert.Contains("<-[e:relation WHERE e.kind = $edge_kind]-", line "query-chunks")
+    Assert.Contains("b.path", line "chunk-columns")
+    Assert.Contains("b.line_start", line "chunk-columns")
+    Assert.Contains("b.line_end", line "chunk-columns")
+    Assert.DoesNotContain("chunks_of", line "edge-kind-other")
+    Assert.Contains("links_to", line "edge-kind-other")
+    let chunksOnly = buildStageGrammar "query_generation" (Some { schema with EdgeKinds = [ "chunks_of" ] }) [ SEED ]
+    Assert.DoesNotContain("fields-filtered-other", chunksOnly)
+
+[<Fact>]
+let ``range grammar binds numeric overlap to the advertised chunk relation`` () =
+    for grammar in [ buildApiGrammar None None; buildApiGrammar (Some schema) (Some [ SEED ])
+                     buildStageGrammar "query_generation" (Some schema) [ SEED ] ] do
+        let line name = grammar.Split('\n') |> Array.find (fun s -> s.StartsWith(name + " ::="))
+        Assert.Contains("fields-chunks-range", line "pgq-fields")
+        Assert.Contains("query-chunks-range", line "fields-chunks-range")
+        Assert.Contains("parameters-chunks", line "fields-chunks-range")
+        Assert.Contains("chunks_of", line "parameters-chunks")
+        Assert.Contains("<-[e:relation WHERE e.kind = $edge_kind]-(b:resource WHERE b.line_start <=", line "query-chunks-range")
+        Assert.Contains(" AND b.line_end >=", line "query-chunks-range")
+        Assert.Contains("line-number", line "query-chunks-range")
+    for context in [ { schema with EdgeKinds = [ "links_to" ] }
+                     { schema with NodeProperties = List.filter ((<>) "line_start") nodeFields }
+                     { schema with NodeProperties = List.filter ((<>) "line_end") nodeFields } ] do
+        Assert.DoesNotContain("fields-chunks-range", buildStageGrammar "query_generation" (Some context) [ SEED ])
 
 [<Fact>]
 let ``every emitted Unicode escape denotes a scalar accepted by GBNF engines`` () =
