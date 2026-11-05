@@ -62,7 +62,7 @@ existing snapshot untouched. The output directory must already exist.
 ## Snapshot and provenance
 
 The output contains `format_version: 1`,
-`extractor_version: "committed-git-lines-v3"`, `snapshot_id`, `repositories`,
+`extractor_version: "committed-git-lines-v4"`, `snapshot_id`, `repositories`,
 `nodes`, `edges`, `classification_version`, `classification_defaults`, and
 `stats`, plus `policy_version: "repository-policy-v1"`. Repository metadata
 contains `name`, `commit`, `source_url`, optional `ref`, normalized explicit
@@ -72,6 +72,10 @@ clone paths do not appear in the output or hash.
 Every node has `id`, `repo`, `revision`, `path`, `kind`, `title`, `line_start`,
 `line_end`, `text`, `source_url`, `corpus_layer`, and `classification_rule`.
 Kinds are `repository`, `file` and `chunk`.
+Markdown file titles come from YAML/TOML front matter through Fidelity.Data,
+then a top-level heading outside fenced code when no title is declared. Files
+without a document title retain their path as the label. Declared malformed
+metadata reports its source path instead of silently losing the title.
 Repository nodes have empty path/text and zero line positions; empty files
 also have zero line positions and produce no chunks. File nodes retain the
 complete accepted text. Source URLs use Forgejo's

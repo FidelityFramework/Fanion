@@ -147,6 +147,29 @@ type Fixture() =
 let private bytes (text: string) = Encoding.UTF8.GetBytes text
 
 [<Fact>]
+let ``document titles preserve declared metadata and headings instead of duplicating paths`` () =
+    use f = new Fixture()
+    let documents =
+        [ "blog/yaml.md", "---\ntitle: \"Retrieving Fidelity\"\nauthors:\n  - Houston Haynes\n---\nBody\n", "Retrieving Fidelity"
+          "blog/toml.md", "+++\ntitle = 'Compiler Evidence'\n+++\nBody\n", "Compiler Evidence"
+          "guide.md", "```\n# Example code\n```\n# Actual Guide #\nBody\n", "Actual Guide"
+          "untitled.md", "A document without a declared title.\n", "untitled.md"
+          "code.fs", "let title = \"Code is not document metadata\"\n", "code.fs" ]
+    for path, content, _ in documents do f.Write(path, content)
+    let snapshot = build (f.Manifest(f.Commit()))
+    for path, content, title in documents do
+        Assert.Equal(title, str snapshot.Files.[path] "title")
+        Assert.Equal(content, str snapshot.Files.[path] "text")
+        Assert.Equal(path, str snapshot.Files.[path] "path")
+
+[<Fact>]
+let ``malformed declared document metadata reports its source path`` () =
+    use f = new Fixture()
+    f.Write("broken.md", "+++\ntitle = [\n+++\nBody\n")
+    let manifest = f.Manifest(f.Commit())
+    Assert.Contains("broken.md", ingestError (fun () -> build manifest |> ignore))
+
+[<Fact>]
 let ``exact commit excludes dirty staged untracked and later commit`` () =
     use f = new Fixture()
     f.Write("code.fs", "let committed = 1\n")

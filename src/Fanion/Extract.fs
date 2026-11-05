@@ -1,6 +1,6 @@
 /// Deterministic, bounded component snapshots of explicitly manifested Git commits:
-/// files and line chunks, never a working tree. Output bytes match the reference
-/// extractor (committed-git-lines-v3) so component identities are unchanged.
+/// files and line chunks, never a working tree. Document titles come from their
+/// declared metadata or heading; file and chunk identities remain path-based.
 module Fanion.Extract
 
 open System
@@ -14,7 +14,7 @@ open System.Threading.Tasks
 open Fanion.Canonical
 open Fanion.Git
 
-let extractorVersion = "committed-git-lines-v3"
+let extractorVersion = "committed-git-lines-v4"
 let classificationVersion = "path-layers-v1"
 let chunkLines, chunkOverlapLines = 100, 10
 
@@ -248,8 +248,7 @@ let private nodeJ (n: NodeOut) : J =
           "line_start", Int (int64 n.LineStart); "line_end", Int (int64 n.LineEnd); "text", Str n.Text; "source_url", Str n.SourceUrl
           "corpus_layer", Str n.Layer; "classification_rule", Str n.Rule ]
 
-/// Conservative inline/reference Markdown link targets, excluding fenced/inline code.
-let markdownTargets (text: string) (maxLinks: int) : string list =
+let private markdownProse (text: string) : string list =
     let prose = ResizeArray<string>()
     let mutable fence : char option = None
     let mutable fenceLength = 0
@@ -261,8 +260,12 @@ let markdownTargets (text: string) (maxLinks: int) : string list =
             | None -> fence <- Some run.[0]; fenceLength <- run.Length
             | Some f when run.[0] = f && run.Length >= fenceLength -> fence <- None
             | _ -> ()
-        elif fence.IsNone then prose.Add(inlineCode.Replace(line, ""))
-    let body = String.Join("\n", prose)
+        elif fence.IsNone then prose.Add line
+    List.ofSeq prose
+
+/// Conservative inline/reference Markdown link targets, excluding fenced/inline code.
+let markdownTargets (text: string) (maxLinks: int) : string list =
+    let body = String.Join("\n", markdownProse text |> List.map (fun line -> inlineCode.Replace(line, "")))
     let normalize (label: string) = String.Join(" ", whitespace.Split(label.ToLowerInvariant().Trim()) |> Array.filter (fun s -> s <> ""))
     let references = Dictionary<string, string>()
     for m in referenceDef.Matches(body) do references.[normalize m.Groups.[1].Value] <- m.Groups.[2].Value.Trim([| '<'; '>' |])
@@ -280,6 +283,39 @@ let markdownTargets (text: string) (maxLinks: int) : string list =
         | true, target -> results.Add target
         | _ -> ()
     List.ofSeq results
+
+/// Metadata decoding stays with Fidelity.Data; extraction owns the document envelope.
+let private documentTitle (path: string) (text: string) =
+    if not (endsWithAny (path.ToLowerInvariant()) [ ".md"; ".markdown" ]) then path
+    else
+        let sourceLines = Text.splitLines text |> Seq.toArray
+        let marker = if sourceLines.Length = 0 then "" else sourceLines.[0].TrimStart('\uFEFF').Trim()
+        let metadataTitle, body =
+            if marker = "---" || marker = "+++" then
+                let finish = sourceLines |> Array.mapi (fun i line -> i, line.Trim()) |> Array.tryFind (fun (i, line) -> i > 0 && (line = marker || (marker = "---" && line = "...")))
+                match finish with
+                | None -> None, text
+                | Some(last, _) ->
+                    let metadata = String.Join("\n", sourceLines.[1 .. last - 1])
+                    let title =
+                        if marker = "---" then
+                            match Fidelity.Data.YAML.Yaml.parse metadata with
+                            | Ok value -> Fidelity.Data.YAML.Yaml.prop "title" value |> Option.bind Fidelity.Data.YAML.Yaml.asString
+                            | Error _ -> raise (IngestError(sprintf "Invalid YAML front matter in %s" path))
+                        else
+                            match Fidelity.Data.TOML.Toml.parse metadata with
+                            | Ok value -> Fidelity.Data.TOML.Toml.getString "title" value
+                            | Error _ -> raise (IngestError(sprintf "Invalid TOML front matter in %s" path))
+                    title, String.Join("\n", sourceLines.[last + 1 ..])
+            else None, text
+        let title =
+            match metadataTitle with
+            | Some value when not (String.IsNullOrWhiteSpace value) -> Some value
+            | _ ->
+                markdownProse body |> List.tryPick (fun line ->
+                    let heading = Regex.Match(line, @"^ {0,3}#\s+(.+?)(?:\s+#+)?\s*$")
+                    if heading.Success then Some heading.Groups.[1].Value else None)
+        title |> Option.map (fun value -> whitespace.Replace(value.Trim(), " ")) |> Option.defaultValue path
 
 let resolveLink (source: string) (target: string) (files: HashSet<string>) : string option =
     let url = Resolve.splitUrl target
@@ -366,7 +402,7 @@ let private processRepository (entry: Entry) (limits: Limits) (deadline: DateTim
                 let fileLines = lines text
                 let count = fileLines.Length
                 let fileId = identity [ Str entry.Name; Str entry.Commit; Str "file"; Str candidate.Path ]
-                let fileNode = { Id = fileId; Repo = entry.Name; Revision = entry.Commit; Path = candidate.Path; Kind = "file"; Title = candidate.Path
+                let fileNode = { Id = fileId; Repo = entry.Name; Revision = entry.Commit; Path = candidate.Path; Kind = "file"; Title = documentTitle candidate.Path text
                                  LineStart = (if count > 0 then 1 else 0); LineEnd = count; Text = text; Layer = layer; Rule = rule
                                  SourceUrl = sourceUrl entry.SourceUrl entry.Commit candidate.Path (if count > 0 then 1 else 0) count }
                 let chunks = ResizeArray<NodeOut>()

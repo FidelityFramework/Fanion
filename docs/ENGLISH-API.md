@@ -22,7 +22,11 @@ The service admits 64 callers and retains at most 128 exact work identities per 
 
 Text is 1–2,000 characters. The graph limit is 1–20 rows; source budget is 4–4,000 shared characters across at most four sources. Query and rows are returned by default; complete context is opt-in. The response includes the executed query and parameters, graph results, pagination, source excerpts, prompt/request hashes and freshness. Inspect actual excerpt spans before citing a source.
 
-With the Magnitude profile, a request naming an exact file and one configured repository uses native literal discovery and one constrained model completion. Requests without that scope retain bounded model planning. Exact-path, freshness and source checks apply in both paths.
+With the Magnitude profile, a request naming a file and one configured repository uses native literal discovery and one constrained model completion. A bare filename resolves a unique matching file in that scope; a supplied repository-relative path retains its path constraint. Multiple matching files return `ambiguous_seed_candidates` rather than selecting a directory arbitrarily. Requests without that scope retain bounded model planning. Freshness and source checks apply in both paths.
+
+The index retains a document's declared title. Discovery's exact title/name or
+path matches constrain the seeds offered to query generation, so documents that
+merely mention the same title cannot displace the named document.
 
 The server validates permitted query syntax, parameter names, seed IDs and scope before graph execution. It checks freshness throughout the request. Errors and stale generations are explicit failures, not successful empty answers. A constrained JSON response still needs semantic checks of seed, direction and relation.
 

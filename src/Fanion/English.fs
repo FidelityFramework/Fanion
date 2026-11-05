@@ -351,14 +351,27 @@ type EnglishService(store: ManagedStore, model: ModelClient option) =
             let results (f: J) = match field f "results" with Some(Arr r) -> r | _ -> []
             let truncated (f: J) = match field f "truncated" with Some(Bool b) -> b | _ -> false
             let idOf (row: J) = match field row "id" with Some(Str i) -> i | _ -> ""
-            for row in results found do seedIds.Add(idOf row) |> ignore
-            candidates.Add(Obj [ "lookup", lookup; "results", Arr (results found); "truncated", Bool (truncated found); "lookup_limit", Int lookupLimit ])
+            let named = results found |> List.filter (fun row -> match field row "reason" with Some(Str "exact_path") | Some(Str "exact_name") -> true | _ -> false)
+            let selected = if named.IsEmpty then results found else named
+            for row in selected do seedIds.Add(idOf row) |> ignore
+            candidates.Add(Obj [ "lookup", lookup; "results", Arr selected; "truncated", Bool (truncated found); "lookup_limit", Int lookupLimit ])
         let rowsOf (found: J) = match field found "results" with Some(Arr r) -> r | _ -> []
         let pathOf (row: J) = match field row "path" with Some(Str p) -> p | _ -> ""
         let idOf (row: J) = match field row "id" with Some(Str i) -> i | _ -> ""
         if not requiredPaths.IsEmpty then
-            let exactRows = [ for found in candidates do for row in rowsOf found do if requiredPaths.Contains(pathOf row) then yield row ]
-            if (exactRows |> List.map pathOf |> Set.ofList) <> requiredPaths then raise (EnglishError("exact_seed_not_found", 422, false))
+            let exactRows =
+                [ for reference in requiredPaths do
+                    let matches =
+                        [ for found in candidates do
+                            for row in rowsOf found do
+                                let candidatePath = pathOf row
+                                let candidateName = if reference.Contains '/' then candidatePath else Path.GetFileName candidatePath
+                                if String.Equals(candidateName, reference, StringComparison.OrdinalIgnoreCase) then yield row ]
+                        |> List.distinctBy idOf
+                    match matches with
+                    | [] -> raise (EnglishError("exact_seed_not_found", 422, false))
+                    | [ row ] -> yield row
+                    | _ -> raise (EnglishError("ambiguous_seed_candidates", 422, false)) ]
             seedIds.Clear()
             for row in exactRows do seedIds.Add(idOf row) |> ignore
             for i in 0 .. candidates.Count - 1 do

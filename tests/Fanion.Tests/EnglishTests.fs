@@ -553,6 +553,43 @@ let ``ranked unique basename resolves requested path without expansion`` () =
         Assert.Equal<string list>([ "docs/z-target.md" ], [ for row in items (field lookup "results") -> text (field row "path") ]))
 
 [<Fact>]
+let ``bare filename resolves the unique nested file without requiring its directory`` () =
+    withCorpus [ "test", mentionFiles "docs/z-target.md" 8 ] (fun _ store snapshot ->
+        let target = idOfPath store snapshot "docs/z-target.md"
+        let plan = Obj [ "lookups", Arr [ Obj [ "query", Str "z-target.md"; "repo", Str "FidelityFramework/test"; "corpus_layer", Null ] ] ]
+        for reference in [ "z-target.md"; "Z-TARGET.MD" ] do
+            let model = RecordingModel(fixtureSettings, scripted [ plan; generatedFor target ], Some store)
+            let body = success (askContext (service store (Some model)) (sprintf "Read %s in FidelityFramework/test." reference))
+            Assert.Equal(target, text (path body [ "parameters"; "seed" ]))
+            Assert.Equal(2, model.Calls.Count))
+
+[<Fact>]
+let ``bare filename reports ambiguity instead of choosing between directories`` () =
+    withCorpus [ "test", [ "docs/target.md", "First\n"; "spec/target.md", "Second\n" ] ] (fun _ store _ ->
+        let plan = Obj [ "lookups", Arr [ Obj [ "query", Str "target.md"; "repo", Str "FidelityFramework/test"; "corpus_layer", Null ] ] ]
+        let model = RecordingModel(fixtureSettings, scripted [ plan ], Some store)
+        Assert.Equal(("ambiguous_seed_candidates", 422, false), failure (ask (service store (Some model)) "Read target.md in FidelityFramework/test."))
+        Assert.Equal(1, model.Calls.Count))
+
+[<Fact>]
+let ``declared title outranks mentions and is the only named seed offered to generation`` () =
+    let documents =
+        [ "a-mention.md", "This discusses Retrieving Fidelity.\n"
+          "blog/retrieving-fidelity.md", "---\ntitle: \"Retrieving Fidelity\"\n---\nThe retrieval article.\n"
+          "z-mention.md", "More about Retrieving Fidelity.\n" ]
+    withCorpus [ "test", documents ] (fun _ store snapshot ->
+        let target = idOfPath store snapshot "blog/retrieving-fidelity.md"
+        let found = items (field (store.Find("Retrieving Fidelity", snapshot, Some "FidelityFramework/test", 4L, None)) "results")
+        Assert.Equal(target, text (field found.Head "id"))
+        Assert.Equal("exact_name", text (field found.Head "reason"))
+        let plan = Obj [ "lookups", Arr [ Obj [ "query", Str "Retrieving Fidelity"; "repo", Str "FidelityFramework/test"; "corpus_layer", Null ] ] ]
+        let model = RecordingModel(fixtureSettings, scripted [ plan; generatedFor target ], Some store)
+        let body = success (askContext (service store (Some model)) "Find the Retrieving Fidelity article in FidelityFramework/test.")
+        let context = userContext (items (field body "context")).[1]
+        Assert.Equal<string list>([ "blog/retrieving-fidelity.md" ], resultPaths context)
+        Assert.Equal(2, model.Calls.Count))
+
+[<Fact>]
 let ``truncated basename lookup fails without retrying the full path`` () =
     // Four same-name files put the requested path outside the bounded first lookup.
     let decoys = [ "z-target.md", "Root decoy\n"; "a/z-target.md", "Decoy a\n"; "b/z-target.md", "Decoy b\n"; "c/z-target.md", "Decoy c\n" ]
