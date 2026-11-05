@@ -236,6 +236,29 @@ let ``tracked build definitions retain policy without admitting build artifacts`
     Assert.Equal(1L, scoped.Reasons.["policy_scope"])
 
 [<Fact>]
+let ``tracked build tooling preserves authored sources and hard exclusions`` () =
+    use f = new Fixture()
+    let sources = set [ "tools/build/TierPlan.fs"; "tools/build/lease.fsx"; "nested/tools/build/run.sh"; "Tools/Build/README.md" ]
+    let excluded =
+        set [ "tools/build/bin/Generated.fs"; "tools/build/obj/Generated.fs"; "tools/build/build/Generated.fs"; "vendor/tools/build/Vendor.fs"
+              ".codex/tools/build/Instructions.fs"; "tools/build/Output.generated.fs"; "tools/build/result.dll"; "tools/build/.env"; "tools/build/id_rsa" ]
+    for path in Set.union sources excluded do f.Write(path, "authored tooling\n")
+    f.Write("tools/build/Secret.fs", "-----BEGIN OPENSSH PRIVATE KEY-----\nprivate\n")
+    let manifest = f.Manifest(f.Commit())
+    let snapshot = build manifest
+    Assert.Equal<Set<string>>(sources, snapshot.Paths)
+    Assert.Equal(int64 sources.Count + 1L, snapshot.Counter "candidate_files")
+    Assert.Equal<Map<string, int64>>(
+        Map.ofList [ "excluded_directory", 4L; "operational_config", 1L; "excluded_suffix", 2L; "secret_filename", 2L; "private_key_header", 1L ],
+        snapshot.Reasons)
+    for path in Set.remove "Tools/Build/README.md" sources do Assert.Equal("tooling", str snapshot.Files.[path] "corpus_layer")
+    Assert.Equal("docs", str snapshot.Files.["Tools/Build/README.md"] "corpus_layer")
+    Assert.DoesNotContain("OPENSSH PRIVATE KEY", snapshot.Text)
+    let scoped = build (manifest |> withField "policy" (raw """{"exclude_paths":["tools/build/TierPlan.fs"]}"""))
+    Assert.Equal<Set<string>>(Set.remove "tools/build/TierPlan.fs" sources, scoped.Paths)
+    Assert.Equal(1L, scoped.Reasons.["policy_scope"])
+
+[<Fact>]
 let ``line chunks preserve crlf overlap and anchors`` () =
     use f = new Fixture()
     let text = String.Join("", [ for n in 1 .. 204 -> sprintf "line %d\r\n" n ]) + "line 205"

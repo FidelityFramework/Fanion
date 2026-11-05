@@ -14,7 +14,7 @@ open System.Threading.Tasks
 open Fanion.Canonical
 open Fanion.Git
 
-let extractorVersion = "committed-git-lines-v4"
+let extractorVersion = "committed-git-lines-v5"
 let classificationVersion = "path-layers-v1"
 let chunkLines, chunkOverlapLines = 100, 10
 
@@ -193,11 +193,15 @@ let private excludedReason (path: string) (includeGenerated: string list) : stri
     let parts = path.ToLowerInvariant().Split('/')
     let name = parts.[parts.Length - 1]
     let dirs = parts.[.. parts.Length - 2]
-    // Tracked MSBuild definitions are source policy even beneath a build directory.
+    // MSBuild definitions and authored tools/build sources are build policy.
     // Other excluded ancestors and all filename/content/policy checks still apply.
     let msbuildDefinition = endsWithAny name [ ".props"; ".targets" ]
+    let excludedDirectory =
+        dirs |> Array.indexed |> Array.exists (fun (index, dir) ->
+            let buildSource = dir = "build" && (msbuildDefinition || (index > 0 && dirs.[index - 1] = "tools"))
+            excludedDirs.Contains dir && not buildSource)
     if dirs |> Array.exists operationalDirs.Contains || operationalFiles.Contains name then Some "operational_config"
-    elif dirs |> Array.exists (fun dir -> excludedDirs.Contains dir && not (dir = "build" && msbuildDefinition)) then Some "excluded_directory"
+    elif excludedDirectory then Some "excluded_directory"
     elif name = ".env" || name.StartsWith(".env.", StringComparison.Ordinal) || name.StartsWith("id_rsa", StringComparison.Ordinal) || name.StartsWith("id_ed25519", StringComparison.Ordinal) || name.StartsWith("id_ecdsa", StringComparison.Ordinal) || name.StartsWith("id_dsa", StringComparison.Ordinal) then Some "secret_filename"
     elif secretNames.Contains name then Some "secret_filename"
     elif endsWithAny name excludedSuffixes && not (selectedGenerated path includeGenerated) then Some "excluded_suffix"
