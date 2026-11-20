@@ -4,6 +4,7 @@ module Fanion.IndexState
 
 open System
 open System.Collections.Generic
+open System.Diagnostics
 open System.IO
 open System.Security.Cryptography
 open System.Text.RegularExpressions
@@ -22,6 +23,8 @@ let eventKinds = set [ "push"; "site_deploy"; "spec_deploy"; "delete"; "reconcil
 let futureTolerance = 5.0
 let settleSecondsDefault = 0.25
 let maxSettleSecondsDefault = 1.0
+let transitionRetentionDefault = 512
+let maxObservationAgeDefault = 90.0
 
 /// Hosted wakeups only: capture Watch before reading SQLite, then await if still
 /// pending. The durable state remains authoritative, including after lost hints.
@@ -45,7 +48,8 @@ type Changes(path: string) =
             if failure.IsNone then
                 failure <- Some error
                 failed.TrySetResult error |> ignore
-                changed.TrySetException(error: exn) |> ignore)
+                changed.TrySetException(error: exn) |> ignore
+                changed.Task.Exception |> ignore)
     do
         watcher.NotifyFilter <- NotifyFilters.FileName ||| NotifyFilters.LastWrite ||| NotifyFilters.Size
         watcher.Changed.Add(fun event -> if relevant event.FullPath then signal ())
@@ -56,7 +60,11 @@ type Changes(path: string) =
         watcher.EnableRaisingEvents <- true
 
     member _.Watch() : Task<unit> = lock gate (fun () -> changed.Task)
-    /// The hosted process supervises this terminal notification failure.
+    // Registration and publication linearize against terminal notification failure.
+    member _.WhileHealthy(action: unit -> unit) =
+        lock gate (fun () -> if failure.IsNone then action ())
+
+    // The hosted process supervises this terminal notification failure.
     member _.Failure : Task<exn> = failed.Task
 
     interface IDisposable with
@@ -96,7 +104,89 @@ let planBody (plan: Plan) : J =
 let planJ (plan: Plan) : J =
     match planBody plan with Obj pairs -> Obj (pairs @ [ "plan_id", Str plan.PlanId ]) | other -> other
 
-type Generation = { Generation: int64; SnapshotId: string; Revisions: Map<string, string option>; PublishedAt: float }
+// ConfigurationSha256 is the corpus configuration identity the publisher bound
+// this generation to; None marks a row published before the column existed.
+type Generation =
+    { Generation: int64; SnapshotId: string; Revisions: Map<string, string option>; PublishedAt: float
+      ConfigurationSha256: string option }
+
+// One coherent read for readiness observers. Freshness keeps the exact shape
+// returned by State.Freshness; the timing fields never enter response JSON.
+type Observation =
+    { Freshness: J; Active: Generation option; ChangedAt: float option; Deadline: float option; CheckedAt: float }
+
+// Readiness commits since the caller's cursor, or explicit truncation when
+// intermediate rows have already been pruned from the bounded journal.
+type ObservationHistory =
+    | Transitions of Observation list
+    | Truncated
+
+// History contains unseen commits at their commit clocks. Current is evaluated at the read clock.
+type ObservationBatch =
+    { Sequence: int64; History: ObservationHistory; Current: Observation; SampledAt: int64 }
+
+type private ObservationFacts =
+    { ObservedAt: (string * float option) list; Required: string list; Pending: string list; ChangedAt: float option }
+
+// Readiness-affecting projection used to dedupe steady-state observation ticks;
+// observation age is compared separately at the commit clock.
+let private readinessKey (facts: ObservationFacts) =
+    [ for source, at in facts.ObservedAt -> source, at.IsSome ], facts.Required, facts.Pending, facts.ChangedAt
+
+let private earliest values = match values with [] -> None | values -> Some(List.min values)
+
+let private factsJ (facts: ObservationFacts) =
+    let strings values = Arr (List.map Str values)
+    let timestamp = function Some t -> Float t | None -> Null
+    Obj [ "observed_at", Obj [ for source, at in facts.ObservedAt -> source, timestamp at ]
+          "required", strings facts.Required; "pending", strings facts.Pending; "changed_at", timestamp facts.ChangedAt ]
+
+let private parseFacts text =
+    let document = JsonInput.parse text
+    let property name = JsonInput.property name document
+    let strings name = JsonInput.items (property name) |> List.map JsonInput.string
+    let timestamp = function
+        | JsonValue.Null -> None
+        | value -> Some(JsonInput.number value)
+    { ObservedAt = JsonInput.fields (property "observed_at") |> List.map (fun (source, at) -> source, timestamp at)
+      Required = strings "required"; Pending = strings "pending"; ChangedAt = timestamp (property "changed_at") }
+
+// The one observation-age rule shared by freshness, replay and the readiness journal.
+let private staleSources now maximumAge (facts: ObservationFacts) =
+    [ for source, observedAt in facts.ObservedAt do
+        match observedAt with
+        | None -> yield source
+        | Some t when now - t > maximumAge || t > now + futureTolerance -> yield source
+        | _ -> () ]
+
+let private assess now maximumAge snapshotId (latest: Generation option) (selected: Generation option) mismatch (facts: ObservationFacts) =
+    let stale = staleSources now maximumAge facts
+    let reasons =
+        [ if selected.IsNone then yield "unknown_snapshot"
+          if latest |> Option.forall (fun g -> g.SnapshotId <> snapshotId) then yield "not_latest_generation"
+          if not facts.Required.IsEmpty then yield "authoritative_observation_required"
+          if not stale.IsEmpty then yield "observation_stale_or_unknown"
+          if not facts.Pending.IsEmpty then yield "indexing_pending"
+          if mismatch then yield "required_revision_mismatch" ]
+    let strings values = Arr (List.map Str values)
+    let freshness =
+        Obj [ "fresh", Bool reasons.IsEmpty; "mode", Str "latest"; "snapshot_id", Str snapshotId
+              "current_snapshot_id", (match latest with Some g -> Str g.SnapshotId | None -> Null)
+              "generation", (match selected with Some g -> Int g.Generation | None -> Null)
+              "reasons", strings reasons; "observation_required", strings facts.Required
+              "stale_sources", strings stale; "pending_sources", strings facts.Pending
+              "checked_at", Float now; "max_observation_age", Float maximumAge ]
+    let since =
+        (facts.ChangedAt |> Option.toList)
+        @ [ for _, at in facts.ObservedAt do
+                match at with Some t when now - t > maximumAge -> yield t + maximumAge | _ -> () ]
+    let deadlines =
+        [ for _, at in facts.ObservedAt do
+            match at with
+            | Some t when t > now + futureTolerance -> yield t - futureTolerance
+            | Some t when now - t <= maximumAge -> yield t + maximumAge
+            | _ -> () ]
+    { Freshness = freshness; Active = latest; ChangedAt = earliest since; Deadline = earliest deadlines; CheckedAt = now }
 
 type private Row = Dictionary<string, obj>
 
@@ -111,12 +201,18 @@ let private str (row: Row) (name: string) = match row.[name] with null -> null |
 let private num (row: Row) (name: string) : float option = match row.[name] with null -> None | :? float as f -> Some f | :? int64 as i -> Some(float i) | v -> Some(Convert.ToDouble v)
 let private int64Of (row: Row) (name: string) : int64 = match row.[name] with :? int64 as i -> i | v -> Convert.ToInt64 v
 
-type State(path: string, allowedSources: (string * string list) list, ?leaseSeconds: float, ?clock: unit -> float, ?settleSeconds: float, ?maxSettleSeconds: float) =
+// maxObservationAge is the journal's observation-age horizon: it must not exceed
+// any observer's max_observation_age (both default to the serving 90 seconds).
+type State(path: string, allowedSources: (string * string list) list, ?leaseSeconds: float, ?clock: unit -> float, ?settleSeconds: float, ?maxSettleSeconds: float, ?transitionRetention: int, ?maxObservationAge: float) =
     let leaseSeconds = number (defaultArg leaseSeconds 300.0) "lease_seconds" true
     let clock = defaultArg clock (fun () -> float (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()) / 1000.0)
     let settleSeconds = number (defaultArg settleSeconds settleSecondsDefault) "settle_seconds" false
     let maxSettleSeconds = number (defaultArg maxSettleSeconds maxSettleSecondsDefault) "max_settle_seconds" false
-    do if maxSettleSeconds < settleSeconds then raise (StateError "settle window must be nonnegative and bounded by max_settle_seconds")
+    let transitionRetention = defaultArg transitionRetention transitionRetentionDefault
+    let journalAge = number (defaultArg maxObservationAge maxObservationAgeDefault) "max_observation_age" true
+    do
+        if maxSettleSeconds < settleSeconds then raise (StateError "settle window must be nonnegative and bounded by max_settle_seconds")
+        if transitionRetention < 1 then raise (StateError "transition_retention must be a positive integer")
     let dependencies : Map<string, string list> =
         if allowedSources.Length < 1 || allowedSources.Length > 256 then raise (StateError "allowed_sources must be a dependency mapping with 1–256 sources")
         let table = Dictionary<string, string list>()
@@ -159,8 +255,21 @@ type State(path: string, allowedSources: (string * string list) list, ?leaseSeco
               "CREATE TABLE IF NOT EXISTS invalidations(id INTEGER PRIMARY KEY AUTOINCREMENT, source_id TEXT NOT NULL REFERENCES sources(source_id), reason TEXT NOT NULL, created_at REAL NOT NULL)"
               "CREATE TABLE IF NOT EXISTS builds(token TEXT PRIMARY KEY, plan TEXT NOT NULL, status TEXT NOT NULL, started_at REAL NOT NULL, lease_until REAL NOT NULL, finished_at REAL, error TEXT, snapshot_id TEXT)"
               "CREATE UNIQUE INDEX IF NOT EXISTS one_running_build ON builds((1)) WHERE status='running'"
-              "CREATE TABLE IF NOT EXISTS generations(generation INTEGER PRIMARY KEY AUTOINCREMENT, snapshot_id TEXT NOT NULL, revisions TEXT NOT NULL, published_at REAL NOT NULL, build_token TEXT UNIQUE NOT NULL REFERENCES builds(token))" ] do exec statement
+              "CREATE TABLE IF NOT EXISTS generations(generation INTEGER PRIMARY KEY AUTOINCREMENT, snapshot_id TEXT NOT NULL, revisions TEXT NOT NULL, published_at REAL NOT NULL, build_token TEXT UNIQUE NOT NULL REFERENCES builds(token))"
+              "CREATE TABLE IF NOT EXISTS readiness_transitions(seq INTEGER PRIMARY KEY AUTOINCREMENT, generation INTEGER NOT NULL REFERENCES generations(generation), committed_at REAL NOT NULL, facts TEXT NOT NULL)" ] do exec statement
+        let transitionsSql =
+            State.Query connection "SELECT sql FROM sqlite_master WHERE type='table' AND name='readiness_transitions'" []
+            |> List.tryHead |> Option.map (fun r -> str r "sql") |> Option.defaultValue ""
+        if not (transitionsSql.Contains("AUTOINCREMENT", StringComparison.OrdinalIgnoreCase)) then
+            exec "CREATE TABLE readiness_transitions_new(seq INTEGER PRIMARY KEY AUTOINCREMENT, generation INTEGER NOT NULL REFERENCES generations(generation), committed_at REAL NOT NULL, facts TEXT NOT NULL)"
+            exec "INSERT INTO readiness_transitions_new(seq,generation,committed_at,facts) SELECT seq,generation,committed_at,facts FROM readiness_transitions ORDER BY seq"
+            exec "DROP TABLE readiness_transitions"
+            exec "ALTER TABLE readiness_transitions_new RENAME TO readiness_transitions"
         let columns = (use c = connection.CreateCommand() in c.CommandText <- "PRAGMA table_info(sources)"; readRows c |> List.map (fun r -> str r "name"))
+        let generationColumns = (use c = connection.CreateCommand() in c.CommandText <- "PRAGMA table_info(generations)"; readRows c |> List.map (fun r -> str r "name"))
+        // Legacy generations keep NULL: replay cannot prove their configuration and fails closed.
+        if not (List.contains "configuration_sha256" generationColumns) then
+            exec "ALTER TABLE generations ADD COLUMN configuration_sha256 TEXT"
         if not (List.contains "changed_at" columns) then
             exec "ALTER TABLE sources ADD COLUMN changed_at REAL"
             exec "UPDATE sources SET changed_at=observed_at WHERE changed_at IS NULL"
@@ -184,22 +293,25 @@ type State(path: string, allowedSources: (string * string list) list, ?leaseSeco
     member _.LeaseSeconds = leaseSeconds
     member _.SettleSeconds = settleSeconds
     member _.MaxSettleSeconds = maxSettleSeconds
+    member _.TransitionRetention = transitionRetention
+    member _.MaxObservationAge = journalAge
     member _.Now() = now ()
 
     /// BEGIN IMMEDIATE also fences reads behind any uncommitted writer: an early
     /// filesystem notification cannot consume a wakeup and observe pre-commit state.
     /// Expire stale leases, run `body`, and commit on success.
-    member private _.Transaction(body: SqliteConnection -> float -> 'T) : 'T =
+    member private _.Transaction(body: SqliteConnection -> float -> int64 -> 'T) : 'T =
         use connection = connect ()
         let exec text = (use c = connection.CreateCommand() in c.CommandText <- text; c.ExecuteNonQuery() |> ignore)
         exec "BEGIN IMMEDIATE"
         try
+            let sampledAt = Stopwatch.GetTimestamp()
             let current = now ()
             (use c = connection.CreateCommand()
              c.CommandText <- "UPDATE builds SET status='expired',finished_at=$n WHERE status='running' AND lease_until<=$n"
              c.Parameters.AddWithValue("$n", current) |> ignore
              c.ExecuteNonQuery() |> ignore)
-            let result = body connection current
+            let result = body connection current sampledAt
             exec "COMMIT"
             result
         with _ ->
@@ -263,13 +375,71 @@ type State(path: string, allowedSources: (string * string list) list, ?leaseSeco
         let planId = Convert.ToHexString(SHA256.HashData(Text.Encoding.UTF8.GetBytes(jsonText (planBody plan)))).ToLowerInvariant()
         { plan with PlanId = planId }
 
-    member this.PendingPlan() : Plan = this.Transaction(fun connection _ -> this.ComputePlan connection)
+    member private _.ObservationFacts(connection: SqliteConnection, plan: Plan) =
+        let rows = State.Query connection "SELECT * FROM sources ORDER BY source_id" []
+        let hinted =
+            State.Query connection "SELECT MIN(e.created_at) AS t FROM events e JOIN sources s ON s.source_id=e.source_id WHERE e.seq>s.observed_hint" []
+            |> List.collect (fun row -> num row "t" |> Option.toList)
+        let changed = set plan.ChangedSources
+        let since =
+            hinted
+            @ [ for row in rows do
+                    let source = str row "source_id"
+                    if changed.Contains source then
+                        match num row "observed_at" with
+                        | Some t -> yield num row "first_changed_at" |> Option.orElseWith (fun () -> num row "changed_at") |> Option.defaultValue t
+                        | None -> () ]
+        { ObservedAt = [ for row in rows -> str row "source_id", num row "observed_at" ]
+          Required = plan.ObservationRequired; Pending = List.ofSeq plan.Targets.Keys; ChangedAt = earliest since }
+
+    // Only readiness-changing writes call this, before their existing COMMIT.
+    // The journal references generation rows and keeps only a bounded suffix.
+    // A tick refreshes the latest row in place (facts and committed_at together,
+    // so replay at committed_at still sees the same readiness) only when the
+    // readiness-affecting fields match and observation age has not moved the
+    // row's stale set since it was committed. Otherwise an expiry that this
+    // write heals would leave its restored state out of replay.
+    member private this.RecordReadiness(connection: SqliteConnection, now: float) =
+        let plan = this.ComputePlan connection
+        match plan.BaseGeneration with
+        | None -> ()
+        | Some generation ->
+            let currentFacts = this.ObservationFacts(connection, plan)
+            let facts = currentFacts |> factsJ |> jsonText
+            let previous =
+                State.Query connection "SELECT seq,generation,committed_at,facts FROM readiness_transitions ORDER BY seq DESC LIMIT 1" []
+                |> List.tryHead
+            let refreshable =
+                match previous with
+                | Some row when int64Of row "generation" = generation ->
+                    let stored = parseFacts (str row "facts")
+                    let committedAt = (num row "committed_at").Value
+                    let staleNow = staleSources now journalAge stored
+                    if readinessKey stored = readinessKey currentFacts
+                       && staleSources committedAt journalAge stored = staleNow
+                       && staleSources now journalAge currentFacts = staleNow then Some(int64Of row "seq")
+                    else None
+                | _ -> None
+            match refreshable with
+            | Some seq ->
+                State.Execute connection
+                    "UPDATE readiness_transitions SET committed_at=$t,facts=$f WHERE seq=$seq"
+                    [ "$t", box now; "$f", box facts; "$seq", box seq ]
+            | None ->
+                State.Execute connection
+                    "INSERT INTO readiness_transitions(generation,committed_at,facts) VALUES ($g,$t,$f)"
+                    [ "$g", box generation; "$t", box now; "$f", box facts ]
+                State.Execute connection
+                    "DELETE FROM readiness_transitions WHERE seq < (SELECT MIN(seq) FROM (SELECT seq FROM readiness_transitions ORDER BY seq DESC LIMIT $limit))"
+                    [ "$limit", box transitionRetention ]
+
+    member this.PendingPlan() : Plan = this.Transaction(fun connection _ _ -> this.ComputePlan connection)
 
     member this.EventHint(eventId: string, sourceId: string, eventKind: string) : J =
         identifier eventId "event ID" |> ignore
         this.Source sourceId
         if isNull eventKind || not (eventKinds.Contains eventKind) then raise (StateError "Unknown event kind")
-        this.Transaction(fun connection now ->
+        this.Transaction(fun connection now _ ->
             match State.Query connection "SELECT source_id,event_kind FROM events WHERE event_id=$e" [ "$e", box eventId ] with
             | existing :: _ ->
                 if str existing "source_id" <> sourceId || str existing "event_kind" <> eventKind then raise (StateError "Event ID reused with different contents")
@@ -278,15 +448,17 @@ type State(path: string, allowedSources: (string * string list) list, ?leaseSeco
                 State.Execute connection "INSERT INTO events(event_id,source_id,event_kind,created_at) VALUES ($e,$s,$k,$t)" [ "$e", box eventId; "$s", box sourceId; "$k", box eventKind; "$t", box now ]
                 let seq = State.LastRowId connection
                 State.Execute connection "UPDATE sources SET last_hint=$h WHERE source_id=$s" [ "$h", box seq; "$s", box sourceId ]
+                this.RecordReadiness(connection, now)
                 Obj [ "accepted", Bool true; "duplicate", Bool false ])
 
     /// Apply trusted observations stamped when authoritative fetching began. None is a confirmed deletion.
     member this.ObserveHeads(heads: (string * string option) list, observedAt: float) : J =
         this.Revisions heads
         let observedAt = number observedAt "observed_at" false
-        this.Transaction(fun connection now ->
+        this.Transaction(fun connection now _ ->
             if observedAt > now + futureTolerance then raise (StateError "Observation is too far in the future")
             let changed, ignored = ResizeArray<string>(), ResizeArray<string>()
+            let mutable updated = false
             for (source, revision) in heads |> List.sortWith (fun (a, _) (b, _) -> String.CompareOrdinal(a, b)) do
                 let row = State.Query connection "SELECT * FROM sources WHERE source_id=$s" [ "$s", box source ] |> List.head
                 let previous = num row "observed_at"
@@ -301,35 +473,33 @@ type State(path: string, allowedSources: (string * string list) list, ?leaseSeco
                         State.Execute connection "UPDATE sources SET changed_at=$t,first_changed_at=CASE WHEN $dirty THEN COALESCE(first_changed_at,$t) ELSE NULL END WHERE source_id=$s"
                             [ "$t", box observedAt; "$dirty", box dirty; "$s", box source ]
                     let hint = State.Query connection "SELECT COALESCE(MAX(seq),0) AS h FROM events WHERE source_id=$s AND created_at<=$t" [ "$s", box source; "$t", box observedAt ] |> List.head
+                    updated <- updated || previous <> Some observedAt || int64Of hint "h" <> int64Of row "observed_hint"
                     State.Execute connection "UPDATE sources SET desired_revision=$r,observed_at=$t,observed_hint=$h WHERE source_id=$s"
                         [ "$r", (match revision with Some r -> box r | None -> null); "$t", box observedAt; "$h", box (int64Of hint "h"); "$s", box source ]
             if changed.Count > 0 then State.Execute connection "UPDATE metadata SET value=CAST(value AS INTEGER)+1 WHERE key='desired_epoch'" []
+            if updated then this.RecordReadiness(connection, now)
             Obj [ "changed", Arr [ for s in changed -> Str s ]; "ignored_older", Arr [ for s in ignored -> Str s ] ])
 
     member this.ActiveGeneration() : Generation option =
-        this.Transaction(fun connection _ ->
-            match State.Query connection "SELECT * FROM generations ORDER BY generation DESC LIMIT 1" [] with
-            | [] -> None
-            | row :: _ ->
-                let revisions = str row "revisions" |> JsonInput.parse |> State.ParseRevisions
-                Some { Generation = int64Of row "generation"; SnapshotId = str row "snapshot_id"; Revisions = revisions; PublishedAt = (num row "published_at").Value })
+        this.Transaction(fun connection _ _ -> this.Latest connection)
 
     member this.InvalidateSources(sourceIds: string list, reason: string) : J =
         if sourceIds.Length < 1 || sourceIds.Length > dependencies.Count then raise (StateError "Invalidation needs a nonempty bounded source list")
         for source in sourceIds do this.Source source
         if sourceIds.Length <> (sourceIds |> List.distinct).Length then raise (StateError "Invalidation source IDs must be unique")
         if isNull reason || reason.Trim() = "" || reason.Length > 1024 then raise (StateError "Invalidation reason must be 1–1024 characters")
-        this.Transaction(fun connection now ->
+        this.Transaction(fun connection now _ ->
             for source in sourceIds do
                 State.Execute connection "UPDATE sources SET indexed_known=0,changed_at=$t,first_changed_at=COALESCE(first_changed_at,$t) WHERE source_id=$s" [ "$s", box source; "$t", box now ]
                 State.Execute connection "INSERT INTO invalidations(source_id,reason,created_at) VALUES ($s,$r,$t)" [ "$s", box source; "$r", box reason; "$t", box now ]
             State.Execute connection "UPDATE metadata SET value=CAST(value AS INTEGER)+1 WHERE key='desired_epoch'" []
             let plan = this.ComputePlan connection
+            this.RecordReadiness(connection, now)
             Obj [ "desired_epoch", Int plan.DesiredEpoch; "pending_sources", Arr [ for s in plan.Targets.Keys -> Str s ] ])
 
     /// Lease one exact current plan; return an opaque completion token.
     member this.StartBuild(plan: Plan) : string =
-        this.Transaction(fun connection now ->
+        this.Transaction(fun connection now _ ->
             let current = this.ComputePlan connection
             if jsonText (planJ plan) <> jsonText (planJ current) then raise (StateError "Plan is stale or modified; request pending_plan again")
             if not current.ObservationRequired.IsEmpty then raise (StateError "Authoritative observations are required before building")
@@ -347,7 +517,7 @@ type State(path: string, allowedSources: (string * string list) list, ?leaseSeco
         | row :: _ -> row
 
     member this.RenewBuild(token: string) : float =
-        this.Transaction(fun connection now ->
+        this.Transaction(fun connection now _ ->
             let row = this.Build(connection, token)
             if str row "status" <> "running" then raise (StateError "Build no longer holds its lease")
             let deadline = now + leaseSeconds
@@ -360,11 +530,14 @@ type State(path: string, allowedSources: (string * string list) list, ?leaseSeco
         |> Map.ofList
 
     /// Commit a logical generation only if its entire desired fence holds.
-    member this.CompleteBuild(token: string, snapshotId: string, indexedRevisions: (string * string option) list) : J =
+    member this.CompleteBuild(token: string, snapshotId: string, indexedRevisions: (string * string option) list, ?configurationSha256: string) : J =
         if isNull snapshotId || not (snapshotPattern.IsMatch snapshotId) then raise (StateError "snapshot_id must be a lowercase 64-hex digest")
+        match configurationSha256 with
+        | Some identity when isNull identity || not (snapshotPattern.IsMatch identity) -> raise (StateError "configuration_sha256 must be a lowercase 64-hex digest")
+        | _ -> ()
         this.Revisions indexedRevisions
         let indexed = Map.ofList indexedRevisions
-        this.Transaction(fun connection now ->
+        this.Transaction(fun connection now _ ->
             let build = this.Build(connection, token)
             let plan = str build "plan" |> JsonInput.parse
             let planTargets = JsonInput.property "targets" plan |> State.ParseRevisions
@@ -390,15 +563,17 @@ type State(path: string, allowedSources: (string * string list) list, ?leaseSeco
                     | _ -> ()
                     for kv in indexed do
                         State.Execute connection "UPDATE sources SET indexed_revision=$r,indexed_known=1,changed_at=NULL,first_changed_at=NULL WHERE source_id=$s" [ "$r", (match kv.Value with Some r -> box r | None -> null); "$s", box kv.Key ]
-                    State.Execute connection "INSERT INTO generations(snapshot_id,revisions,published_at,build_token) VALUES ($i,$r,$p,$t)"
-                        [ "$i", box snapshotId; "$r", box (jsonText (revisionsJ current.DesiredRevisions)); "$p", box now; "$t", box token ]
+                    State.Execute connection "INSERT INTO generations(snapshot_id,revisions,published_at,build_token,configuration_sha256) VALUES ($i,$r,$p,$t,$c)"
+                        [ "$i", box snapshotId; "$r", box (jsonText (revisionsJ current.DesiredRevisions)); "$p", box now; "$t", box token
+                          "$c", (match configurationSha256 with Some identity -> box identity | None -> null) ]
                     let generation = State.LastRowId connection
                     State.Execute connection "UPDATE builds SET status='completed',snapshot_id=$i,finished_at=$n WHERE token=$t" [ "$i", box snapshotId; "$n", box now; "$t", box token ]
+                    this.RecordReadiness(connection, now)
                     Obj [ "published", Bool true; "status", Str "completed"; "generation", Int generation; "snapshot_id", Str snapshotId; "replayed", Bool false ])
 
     member this.FailBuild(token: string, error: string) : J =
         if isNull error || error.Length > 1024 then raise (StateError "Build error must be at most 1024 characters")
-        this.Transaction(fun connection now ->
+        this.Transaction(fun connection now _ ->
             let row = this.Build(connection, token)
             match str row "status" with
             | "completed" -> raise (StateError "A completed generation cannot be failed")
@@ -407,35 +582,75 @@ type State(path: string, allowedSources: (string * string list) list, ?leaseSeco
                 Obj [ "status", Str "failed"; "retry", Bool true ]
             | other -> Obj [ "status", Str other; "retry", Bool true ])
 
-    /// Fail-closed latest-only check.
+    static member private GenerationRow(row: Row) =
+        { Generation = int64Of row "generation"; SnapshotId = str row "snapshot_id"; PublishedAt = (num row "published_at").Value
+          Revisions = str row "revisions" |> JsonInput.parse |> State.ParseRevisions
+          ConfigurationSha256 = match str row "configuration_sha256" with null -> None | identity -> Some identity }
+
+    member private _.Latest(connection: SqliteConnection) =
+        State.Query connection "SELECT * FROM generations ORDER BY generation DESC LIMIT 1" []
+        |> List.tryHead |> Option.map State.GenerationRow
+
+    // Fail-closed latest-only check.
     member this.Freshness(snapshotId: string, maxObservationAge: float, ?requiredRevisions: (string * string option) list) : J =
         if isNull snapshotId || not (snapshotPattern.IsMatch snapshotId) then raise (StateError "snapshot_id must be a lowercase 64-hex digest")
         let maximumAge = number maxObservationAge "max_observation_age" true
         let required = defaultArg requiredRevisions []
         this.Revisions required
-        this.Transaction(fun connection now ->
+        this.Transaction(fun connection now _ ->
+            let latest = this.Latest connection
+            let selected =
+                if latest |> Option.exists (fun g -> g.SnapshotId = snapshotId) then latest
+                else
+                    State.Query connection "SELECT * FROM generations WHERE snapshot_id=$s ORDER BY generation DESC LIMIT 1" [ "$s", box snapshotId ]
+                    |> List.tryHead |> Option.map State.GenerationRow
             let plan = this.ComputePlan connection
-            let latest = State.Query connection "SELECT * FROM generations ORDER BY generation DESC LIMIT 1" [] |> List.tryHead
-            let selected = State.Query connection "SELECT * FROM generations WHERE snapshot_id=$s ORDER BY generation DESC LIMIT 1" [ "$s", box snapshotId ] |> List.tryHead
-            let rows = State.Query connection "SELECT * FROM sources ORDER BY source_id" []
-            let stale = [ for row in rows do
-                            match num row "observed_at" with
-                            | None -> yield str row "source_id"
-                            | Some t when now - t > maximumAge || t > now + futureTolerance -> yield str row "source_id"
-                            | _ -> () ]
-            let reasons = ResizeArray<string>()
-            if selected.IsNone then reasons.Add "unknown_snapshot"
-            if latest.IsNone || str latest.Value "snapshot_id" <> snapshotId then reasons.Add "not_latest_generation"
-            if not plan.ObservationRequired.IsEmpty then reasons.Add "authoritative_observation_required"
-            if not stale.IsEmpty then reasons.Add "observation_stale_or_unknown"
-            if not plan.Targets.IsEmpty then reasons.Add "indexing_pending"
-            let selectedRevisions = match selected with Some s -> State.ParseRevisions(JsonInput.parse (str s "revisions")) | None -> Map.empty
-            if required |> List.exists (fun (source, revision) ->
-                   not (selectedRevisions.ContainsKey source) || selectedRevisions.[source] <> revision || (Map.tryFind source plan.DesiredRevisions |> Option.flatten) <> revision) then
-                reasons.Add "required_revision_mismatch"
-            Obj [ "fresh", Bool (reasons.Count = 0); "mode", Str "latest"; "snapshot_id", Str snapshotId
-                  "current_snapshot_id", (match latest with Some l -> Str (str l "snapshot_id") | None -> Null)
-                  "generation", (match selected with Some s -> Int (int64Of s "generation") | None -> Null)
-                  "reasons", Arr [ for r in reasons -> Str r ]; "observation_required", Arr (plan.ObservationRequired |> List.map Str)
-                  "stale_sources", Arr (stale |> List.map Str); "pending_sources", Arr [ for s in plan.Targets.Keys -> Str s ]
-                  "checked_at", Float now; "max_observation_age", Float maximumAge ])
+            let mismatch = required |> List.exists (fun (source, revision) ->
+                (selected |> Option.bind (fun g -> Map.tryFind source g.Revisions)) <> Some revision
+                || (Map.tryFind source plan.DesiredRevisions |> Option.flatten) <> revision)
+            (assess now maximumAge snapshotId latest selected mismatch (this.ObservationFacts(connection, plan))).Freshness)
+
+    member this.ObserveSince(maxObservationAge: float, after: int64 option) : ObservationBatch =
+        let maximumAge = number maxObservationAge "max_observation_age" true
+        this.Transaction(fun connection now sampledAt ->
+            let bounds =
+                State.Query connection "SELECT COALESCE(MIN(seq),0) AS min_seq, COALESCE(MAX(seq),0) AS max_seq FROM readiness_transitions" []
+                |> List.head
+            let oldest = int64Of bounds "min_seq"
+            let sequence = int64Of bounds "max_seq"
+            let current =
+                match this.Latest connection with
+                | Some generation as active ->
+                    let plan = this.ComputePlan connection
+                    assess now maximumAge generation.SnapshotId active active false (this.ObservationFacts(connection, plan))
+                | None ->
+                    { Freshness = Obj [ "fresh", Bool false; "reasons", Arr [ Str "no_published_generation" ] ]
+                      Active = None; ChangedAt = None; Deadline = None; CheckedAt = now }
+            // None is a brand-new read; Some cursor (including Some 0L, held after an
+            // unpublished sample) is an established cursor whose pruned successors truncate.
+            let history =
+                match after with
+                | None -> Transitions []
+                | Some cursor when cursor < sequence && oldest > cursor + 1L -> Truncated
+                | Some cursor when cursor < sequence ->
+                    // The newest commit can differ from Current after an observation expires.
+                    let readiness (observation: Observation) =
+                        let freshness =
+                            match observation.Freshness with
+                            | Obj pairs -> Obj (pairs |> List.filter (fun (key, _) -> key <> "checked_at"))
+                            | other -> other
+                        observation.Active, observation.ChangedAt, freshness
+                    let currentReadiness = readiness current
+                    State.Query connection
+                        "SELECT g.*, t.seq, t.committed_at, t.facts FROM readiness_transitions t JOIN generations g USING (generation) WHERE t.seq>$after AND t.seq<=$sequence ORDER BY t.seq"
+                        [ "$after", box cursor; "$sequence", box sequence ]
+                    |> List.choose (fun row ->
+                        let generation = State.GenerationRow row
+                        let committed = assess (num row "committed_at").Value maximumAge generation.SnapshotId (Some generation) (Some generation) false (parseFacts (str row "facts"))
+                        if int64Of row "seq" = sequence && readiness committed = currentReadiness then None
+                        else Some committed)
+                    |> Transitions
+                | _ -> Transitions []
+            { Sequence = sequence; History = history; Current = current; SampledAt = sampledAt })
+
+    member this.Observe(maxObservationAge: float) = (this.ObserveSince(maxObservationAge, None)).Current

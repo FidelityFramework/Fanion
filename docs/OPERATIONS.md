@@ -100,6 +100,30 @@ deadlines long enough for the service to complete or return its own failure.
 `/health` returns 503 while latest evidence is unavailable; `remit` remains
 available, and an unpinned text request waits within its budget.
 
+`GET /v1/retrieval/observe` uses the retrieval bearer token. It sends an
+initial `readiness` event, then transitions between `fresh`, `indexing` and
+`unavailable`. A stream sends a `: keepalive` comment after 15 seconds of
+silence following its first event. SQLite records readiness inputs in a bounded
+journal in the transaction that changes them, so the observer can replay commits
+in order even when one filesystem wakeup covers several commits. The journal
+uses the same 90-second observation age as serving: a refresh that heals an
+expired observation records the restored state, and a historical generation
+replays as fresh only when the corpus configuration identity recorded at its
+publication matches the serving configuration. The producer
+wakes on publication notifications and observation expiry.
+
+The service admits 16 observers with 32 queued frames each. A full service
+returns HTTP 429 `retrieval_observers_saturated`. A full queue or a pruned
+transition cursor ends that stream with `observer_lagged`. Shutdown sends `retrieval_stopping` to open
+streams and returns HTTP 503 before a stream begins. A failed publication watch
+ends streams with `publication_notifications_failed` and stops the process.
+A graph binding failure ends its stream with `graph_generation_unavailable`.
+Other sampling failures end it with `observation_failed`. Clients can
+reconnect after either sampling failure. Writes have a 10-second limit. When
+a stream ends, an in-flight write has up to one second within that limit to
+drain before the transport is canceled. Ingress must allow long-lived streaming.
+Responses carry `X-Accel-Buffering: no`.
+
 ## Lab release integration
 
 The lab's

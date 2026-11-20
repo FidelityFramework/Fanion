@@ -123,7 +123,7 @@ type Options =
     { Root: string; Config: string; Engine: Load.Engine; Budgets: Generation.Budgets; ExtractLimits: Extract.Limits
       RemoteBase: string; LeaseSeconds: float; SettleSeconds: float option; MaxSettleSeconds: float option; LockFiles: string list }
 
-type Coordinator(options: Options, stop: CancellationToken) =
+type Coordinator(options: Options, stop: CancellationToken, ?maxObservationAge: float) =
     let root = Path.GetFullPath options.Root
     let sources, _ = configSources options.Config
     let byId = sources |> List.map (fun s -> s.Id, s) |> Map.ofList
@@ -132,7 +132,7 @@ type Coordinator(options: Options, stop: CancellationToken) =
     do for directory in [ "mirrors"; "components"; "generations" ] do Directory.CreateDirectory(Path.Combine(root, directory)) |> ignore
     let state =
         State(Path.Combine(root, "index-state.sqlite"), [ for s in sources -> s.Id, s.DependsOn ], leaseSeconds = options.LeaseSeconds,
-              ?settleSeconds = options.SettleSeconds, ?maxSettleSeconds = options.MaxSettleSeconds)
+              ?settleSeconds = options.SettleSeconds, ?maxSettleSeconds = options.MaxSettleSeconds, ?maxObservationAge = maxObservationAge)
     do
         let marker = Path.Combine(root, "extractor-fingerprint.json")
         let previous = if File.Exists marker then Some(File.ReadAllText marker) else None
@@ -306,7 +306,7 @@ type Coordinator(options: Options, stop: CancellationToken) =
                 if not (this.Observe()).IsEmpty then raise (InvalidOperationException "Authoritative recheck failed; staged generation remains unpublished")
                 mark "observe_heads"
                 checkpoint ()
-                let result = state.CompleteBuild(token, report.SnapshotId, [ for kv in plan.Targets -> kv.Key, kv.Value ])
+                let result = state.CompleteBuild(token, report.SnapshotId, [ for kv in plan.Targets -> kv.Key, kv.Value ], configurationSha256 = identity)
                 mark "publish"
                 let phases = Obj [ for (name, seconds) in report.Phases -> name, Float (Math.Round(seconds, 3)) ]
                 let generationTiming =

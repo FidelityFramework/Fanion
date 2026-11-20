@@ -5,8 +5,15 @@ module Fanion.Tests.ServeTests
 
 open System
 open System.Net
+open System.IO
+open System.IO.Pipelines
+open System.Threading.Channels
+open System.Threading.Tasks
+open Microsoft.AspNetCore.Builder
+open Microsoft.AspNetCore.Connections
+open Microsoft.Extensions.DependencyInjection
+open Microsoft.Extensions.DependencyInjection.Extensions
 open System.Net.Http
-open System.Net.Sockets
 open System.Security.Cryptography
 open System.Text
 open System.Threading
@@ -18,57 +25,90 @@ open Fanion.English
 open Fanion.Tests.IndexStateTests
 open Fanion.Tests.EnglishTests
 
-let private freePort () =
-    let listener = new TcpListener(IPAddress.Loopback, 0)
-    listener.Start()
-    let port = (listener.LocalEndpoint :?> IPEndPoint).Port
-    listener.Stop()
-    port
+// The test transport carries real HTTP bytes to Kestrel without binding a socket.
+type private WireStream(reader: Stream, writer: Stream) =
+    inherit Stream()
+    override _.CanRead = true
+    override _.CanWrite = true
+    override _.CanSeek = false
+    override _.Length = raise (NotSupportedException())
+    override _.Position with get () = raise (NotSupportedException()) and set _ = raise (NotSupportedException())
+    override _.Seek(_, _) = raise (NotSupportedException())
+    override _.SetLength _ = raise (NotSupportedException())
+    override _.Flush() = writer.Flush()
+    override _.FlushAsync cancellation = writer.FlushAsync cancellation
+    override _.Read(buffer, offset, count) = reader.Read(buffer, offset, count)
+    override _.ReadAsync(buffer: Memory<byte>, cancellation) = reader.ReadAsync(buffer, cancellation)
+    override _.Write(buffer, offset, count) = writer.Write(buffer, offset, count)
+    override _.WriteAsync(buffer: ReadOnlyMemory<byte>, cancellation) = writer.WriteAsync(buffer, cancellation)
+    override _.Dispose(disposing) =
+        if disposing then
+            writer.Dispose()
+            reader.Dispose()
+        base.Dispose disposing
+
+type WireTransport() =
+    let connections = Channel.CreateUnbounded<ConnectionContext>()
+    let duplex reader writer =
+        { new IDuplexPipe with
+            member _.Input = reader
+            member _.Output = writer }
+    member _.Connect() : Stream =
+        let inbound, outbound = Pipe(), Pipe()
+        let transport = duplex inbound.Reader outbound.Writer
+        let application = duplex outbound.Reader inbound.Writer
+        let connection = new DefaultConnectionContext(Guid.NewGuid().ToString("N"), transport, application)
+        if not (connections.Writer.TryWrite connection) then invalidOp "Kestrel test transport has stopped"
+        new WireStream(outbound.Reader.AsStream(), inbound.Writer.AsStream())
+    member this.Configure(builder: WebApplicationBuilder) =
+        builder.Services.RemoveAll<IConnectionListenerFactory>().AddSingleton<IConnectionListenerFactory>(this) |> ignore
+    interface IConnectionListenerFactory with
+        member _.BindAsync(endpoint, _) =
+            ValueTask<IConnectionListener>(
+                { new IConnectionListener with
+                    member _.EndPoint = endpoint
+                    member _.AcceptAsync cancellation = ValueTask<ConnectionContext>(task {
+                        let! available = connections.Reader.WaitToReadAsync cancellation
+                        return if available then (let _, connection = connections.Reader.TryRead() in connection) else null })
+                    member _.UnbindAsync _ =
+                        connections.Writer.TryComplete() |> ignore
+                        ValueTask.CompletedTask
+                    member _.DisposeAsync() = ValueTask.CompletedTask })
 
 let private read (response: HttpResponseMessage) =
     int response.StatusCode, response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
 
-/// Serve.run blocks on Kestrel, so the gateway runs on a background thread for the
-/// lifetime of the test process; each test owns its root, port and token.
+// The gateway runs its production routes and Kestrel protocol over the test transport.
 type Server(corpus: Corpus, model: ModelClient option, secret: byte[] option, ?changes: IndexState.Changes) =
-    let port = freePort ()
+    let wire = WireTransport()
+    let cancellation = new CancellationTokenSource()
     let token = String('t', 48)
     let options : Fanion.Serve.Options =
         { Root = corpus.Root; Config = corpus.Config; Engine = corpus.Engine; PromptFile = promptFile; Token = token; WebhookSecret = secret
-          Host = "127.0.0.1"; Port = port; Model = model }
-    let client = new HttpClient(BaseAddress = Uri(sprintf "http://127.0.0.1:%d/" port), Timeout = TimeSpan.FromSeconds 120.0)
-    let stopped = System.Threading.Tasks.TaskCompletionSource<int>(System.Threading.Tasks.TaskCreationOptions.RunContinuationsAsynchronously)
-    do
-        let thread = Thread(ThreadStart(fun () ->
-            try
-                let code =
-                    match changes with
-                    | Some watch -> Fanion.Serve.runWithChanges (fun _ -> watch) options
-                    | None -> Fanion.Serve.run options
-                stopped.TrySetResult code |> ignore
-            with error -> stopped.TrySetException error |> ignore))
-        thread.IsBackground <- true
-        thread.Start()
-        let deadline = DateTime.UtcNow.AddSeconds 120.0
-        let mutable ready = false
-        while not ready do
-            try
-                use response = client.Send(new HttpRequestMessage(HttpMethod.Get, "health"))
-                ready <- true
-            with _ ->
-                if DateTime.UtcNow > deadline then failwith "gateway did not start"
-                Thread.Sleep 100
+          Host = "127.0.0.1"; Port = 0; Model = model; Observers = Requests.defaultObserverOptions }
+    let createClient timeout =
+        let handler = new SocketsHttpHandler(UseProxy = false)
+        handler.ConnectCallback <- fun _ _ -> ValueTask<Stream>(wire.Connect())
+        new HttpClient(handler, BaseAddress = Uri("http://127.0.0.1/"), Timeout = timeout)
+    let client = createClient (TimeSpan.FromSeconds 120.0)
+    let send (request: HttpRequestMessage) = client.SendAsync request |> Async.AwaitTask |> Async.RunSynchronously
+    let createChanges path =
+        match changes with Some watch -> watch | None -> new IndexState.Changes(path)
+    let stopped = Task.Run<int>(Func<Task<int>>(fun () ->
+        Fanion.Serve.runWithChangesAsync createChanges wire.Configure cancellation.Token options))
     member _.Token = token
-    member _.Stopped = stopped.Task
+    member _.CreateClient(timeout) = createClient timeout
+    member _.Stopped = stopped
     member _.Get(path: string) =
-        use response = client.Send(new HttpRequestMessage(HttpMethod.Get, path))
+        use request = new HttpRequestMessage(HttpMethod.Get, path)
+        use response = send request
         read response
     member _.Post(path: string, body: byte[], headers: (string * string) list) =
         use request = new HttpRequestMessage(HttpMethod.Post, path)
         request.Content <- new ByteArrayContent(body)
         request.Content.Headers.ContentType <- Headers.MediaTypeHeaderValue("application/json")
         for (name, value) in headers do request.Headers.TryAddWithoutValidation(name, value) |> ignore
-        use response = client.Send(request)
+        use response = send request
         read response
     /// POST /v1/retrieval with the bearer token unless anonymous; the body parsed when it is JSON.
     member this.Retrieval(json: string, ?anonymous: bool) =
@@ -77,14 +117,27 @@ type Server(corpus: Corpus, model: ModelClient option, secret: byte[] option, ?c
     member this.Call(value: J) = this.Retrieval(jsonOf value)
     member this.Health() = let status, body = this.Get "health" in status, parse body
 
-/// Build and publish a corpus, then serve it; a no-op when the engine is not configured for this run.
-let withServer (repos: (string * (string * string) list) list) (model: ModelClient option) (secret: byte[] option) (body: Corpus -> Server -> unit) =
+    interface IAsyncDisposable with
+        member _.DisposeAsync() = ValueTask(task {
+            try
+                do! cancellation.CancelAsync()
+                let! _ = stopped
+                ()
+            finally
+                client.Dispose()
+                cancellation.Dispose()
+        })
+
+// Build and publish a corpus, then serve it when a matching engine is configured.
+let withServer (repos: (string * (string * string) list) list) (model: ModelClient option) (secret: byte[] option) (body: Corpus -> Server -> unit) = task {
     match environment () with
     | None -> ()
     | Some(extensions, libduckdb) ->
         use corpus = new Corpus(repos, engineOf extensions libduckdb, extensions)
         corpus.Publish() |> ignore
-        body corpus (Server(corpus, model, secret))
+        use server = new Server(corpus, model, secret)
+        body corpus server
+}
 
 let private snapshotOf (server: Server) =
     let status, schema = server.Call(Obj [ "action", Str "schema" ])
@@ -188,7 +241,11 @@ let ``ask through the gateway runs the scripted model over the real graph`` () =
         Assert.Equal("Content 1\nEvidence\n", text (field (items (field body "sources")).[0] "text"))
         Assert.Equal(2, (items (field body "context")).Length)
         Assert.Equal(2, model.Calls.Count)
-        Assert.True(bool' (field body "freshness") "fresh")
+        let freshness = field body "freshness"
+        Assert.True(bool' freshness "fresh")
+        Assert.Equal<string list>(
+            [ "fresh"; "mode"; "snapshot_id"; "current_snapshot_id"; "generation"; "reasons"; "observation_required"
+              "stale_sources"; "pending_sources"; "checked_at"; "max_observation_age" ], pairs freshness |> List.map fst)
         // A snapshot_id from another generation is refused, retryable, before any inference.
         let status, stale = server.Call(Obj [ "action", Str "ask"; "text", Str question; "snapshot_id", Str (String('f', 64)) ])
         Assert.Equal(409, status)
@@ -269,6 +326,7 @@ let private queuedQuestion text : Requests.Question =
     { Text = text; Snapshot = None; Limit = 8L; MaxChars = 2400L; IncludeContext = false; IncludeQuery = true; IncludeResults = true }
 let private completed<'T> () = System.Threading.Tasks.TaskCompletionSource<'T>(System.Threading.Tasks.TaskCreationOptions.RunContinuationsAsynchronously)
 let private unchanged = (completed<unit> ()).Task
+let private watchHealthy = (completed<exn> ()).Task
 let private bounded (pending: System.Threading.Tasks.Task<'T>) = pending.WaitAsync(TimeSpan.FromSeconds 10.0)
 let private until condition = task {
     use deadline = new CancellationTokenSource(TimeSpan.FromSeconds 10.0)
@@ -285,7 +343,7 @@ let ``four callers share work and one cancellation cannot cancel peers or repeat
     let entered, release = completed<unit> (), completed<unit> ()
     let mutable calls = 0
     let ctx : Requests.Ctx =
-        { Sources = []; Readiness = fun _ -> System.Threading.Tasks.Task.FromResult(readyAt "one" true)
+        { Sources = []; Observe = (fun _ _ -> failwith "Ask tests never observe"); WatchFailure = watchHealthy; WhileWatchHealthy = (fun action -> action ()); Readiness = fun _ -> System.Threading.Tasks.Task.FromResult(readyAt "one" true)
           WatchReadiness = fun () -> unchanged
           Evaluate = fun _ snapshot ct -> task {
               Interlocked.Increment(&calls) |> ignore
@@ -317,7 +375,7 @@ let ``distinct questions queue within one model slot`` () =
     let entered, release = completed<unit> (), completed<unit> ()
     let mutable calls, running, peak = 0, 0, 0
     let ctx : Requests.Ctx =
-        { Sources = []; Readiness = fun _ -> System.Threading.Tasks.Task.FromResult(readyAt "one" true)
+        { Sources = []; Observe = (fun _ _ -> failwith "Ask tests never observe"); WatchFailure = watchHealthy; WhileWatchHealthy = (fun action -> action ()); Readiness = fun _ -> System.Threading.Tasks.Task.FromResult(readyAt "one" true)
           WatchReadiness = fun () -> unchanged
           Evaluate = fun question _ ct -> task {
               let active = Interlocked.Increment(&running)
@@ -351,7 +409,7 @@ let ``snapshot work waits before admission and an in-flight update rebinds witho
         snapshot <- current; fresh <- isFresh
         previous.SetResult()
     let ctx : Requests.Ctx =
-        { Sources = []; Readiness = fun _ -> System.Threading.Tasks.Task.FromResult(readyAt snapshot fresh)
+        { Sources = []; Observe = (fun _ _ -> failwith "Ask tests never observe"); WatchFailure = watchHealthy; WhileWatchHealthy = (fun action -> action ()); Readiness = fun _ -> System.Threading.Tasks.Task.FromResult(readyAt snapshot fresh)
           WatchReadiness = fun () -> changed.Task
           Evaluate = fun _ bound ct -> task {
               let call = Interlocked.Increment(&calls)
@@ -378,7 +436,7 @@ let ``publication wakes all waiting callers without canceling a shared watch`` (
     let changed, waiting = completed<unit> (), completed<unit> ()
     let mutable fresh, reads, calls = false, 0, 0
     let ctx : Requests.Ctx =
-        { Sources = []; WatchReadiness = fun () -> changed.Task
+        { Sources = []; Observe = (fun _ _ -> failwith "Ask tests never observe"); WatchFailure = watchHealthy; WhileWatchHealthy = (fun action -> action ()); WatchReadiness = fun () -> changed.Task
           Readiness = fun _ ->
               if Interlocked.Increment(&reads) = 4 then waiting.SetResult()
               System.Threading.Tasks.Task.FromResult(readyAt "one" fresh)
@@ -408,7 +466,7 @@ let ``publication between watch capture and readiness read is not lost`` () =
     let mutable changed = completed<unit> ()
     let mutable reads = 0
     let ctx : Requests.Ctx =
-        { Sources = []; WatchReadiness = fun () -> changed.Task
+        { Sources = []; Observe = (fun _ _ -> failwith "Ask tests never observe"); WatchFailure = watchHealthy; WhileWatchHealthy = (fun action -> action ()); WatchReadiness = fun () -> changed.Task
           Readiness = fun _ ->
               let first = Interlocked.Increment(&reads) = 1
               if first then
@@ -429,7 +487,7 @@ let ``failed publication watch fails the request instead of silently waiting`` (
     let failed = completed<unit> ()
     failed.SetException(System.IO.IOException "publication notification failed")
     let ctx : Requests.Ctx =
-        { Sources = []; WatchReadiness = fun () -> failed.Task
+        { Sources = []; Observe = (fun _ _ -> failwith "Ask tests never observe"); WatchFailure = watchHealthy; WhileWatchHealthy = (fun action -> action ()); WatchReadiness = fun () -> failed.Task
           Readiness = fun _ -> System.Threading.Tasks.Task.FromResult(readyAt "one" true)
           Evaluate = fun _ _ _ -> failwith "A failed readiness watch must not start inference" }
     runQueue ctx (fun service -> task {
@@ -447,7 +505,7 @@ let ``watcher error stops a running gateway with nonzero status`` overflow = tas
         use corpus = new Corpus(standard, engineOf extensions libduckdb, extensions)
         corpus.Publish() |> ignore
         use changes = new IndexState.Changes(System.IO.Path.Combine(corpus.Root, "index-state.sqlite"))
-        let server = Server(corpus, None, None, changes = changes)
+        use server = new Server(corpus, None, None, changes = changes)
         corpus.Coordinator.State.InvalidateSources(["test"], "Watcher failure fixture") |> ignore
         Assert.Equal(503, fst (server.Health()))
         let pending = System.Threading.Tasks.Task.Run(fun () -> server.Call(Obj [ "action", Str "ask"; "text", Str "Which files does 0.md link to?" ]))
@@ -475,7 +533,7 @@ let ``final cancellation drains I O before next work occupies the model`` () =
     let entered, cleanup, finish = completed<unit> (), completed<unit> (), completed<unit> ()
     let mutable calls = 0
     let ctx : Requests.Ctx =
-        { Sources = []; Readiness = fun _ -> System.Threading.Tasks.Task.FromResult(readyAt "one" true)
+        { Sources = []; Observe = (fun _ _ -> failwith "Ask tests never observe"); WatchFailure = watchHealthy; WhileWatchHealthy = (fun action -> action ()); Readiness = fun _ -> System.Threading.Tasks.Task.FromResult(readyAt "one" true)
           WatchReadiness = fun () -> unchanged
           Evaluate = fun _ _ ct -> task {
               let call = Interlocked.Increment(&calls)
@@ -506,7 +564,7 @@ let ``final cancellation drains I O before next work occupies the model`` () =
 let ``bounded epoch rotation retains no work from the previous epoch`` () =
     let mutable calls = 0
     let ctx : Requests.Ctx =
-        { Sources = []; Readiness = fun _ -> System.Threading.Tasks.Task.FromResult(readyAt "one" true)
+        { Sources = []; Observe = (fun _ _ -> failwith "Ask tests never observe"); WatchFailure = watchHealthy; WhileWatchHealthy = (fun action -> action ()); Readiness = fun _ -> System.Threading.Tasks.Task.FromResult(readyAt "one" true)
           WatchReadiness = fun () -> unchanged
           Evaluate = fun q _ _ -> System.Threading.Tasks.Task.FromResult(Interlocked.Increment(&calls) |> ignore; Str q.Text) }
     runQueue ctx (fun service -> task {
@@ -525,7 +583,7 @@ let ``last consumer releases all capacity waiters and a canceled waiter does not
     let entered, release = completed<unit> (), completed<unit> ()
     let mutable calls = 0
     let ctx : Requests.Ctx =
-        { Sources = []; Readiness = fun _ -> System.Threading.Tasks.Task.FromResult(readyAt "one" true)
+        { Sources = []; Observe = (fun _ _ -> failwith "Ask tests never observe"); WatchFailure = watchHealthy; WhileWatchHealthy = (fun action -> action ()); Readiness = fun _ -> System.Threading.Tasks.Task.FromResult(readyAt "one" true)
           WatchReadiness = fun () -> unchanged
           Evaluate = fun q _ ct -> task {
               Interlocked.Increment(&calls) |> ignore
@@ -592,7 +650,7 @@ let ``readiness waits for a busy graph without requiring a publication event`` (
 let ``service shutdown joins observers and cleanup and may be observed twice`` () = task {
     let entered, drained = completed<unit> (), completed<unit> ()
     let ctx : Requests.Ctx =
-        { Sources = []; Readiness = fun _ -> System.Threading.Tasks.Task.FromResult(readyAt "one" true)
+        { Sources = []; Observe = (fun _ _ -> failwith "Ask tests never observe"); WatchFailure = watchHealthy; WhileWatchHealthy = (fun action -> action ()); Readiness = fun _ -> System.Threading.Tasks.Task.FromResult(readyAt "one" true)
           WatchReadiness = fun () -> unchanged
           Evaluate = fun _ _ ct -> task {
               entered.SetResult()

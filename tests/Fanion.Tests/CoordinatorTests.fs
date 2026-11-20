@@ -73,6 +73,19 @@ let private options (lab: Lab) (extensions: string) (libduckdb: string) : Fanion
       LockFiles = [ lock "duckpgq-lock.json"; lock "libduckdb-lock.json" ] }
 
 [<Fact>]
+let ``coordinator and managed store share default and configured observation ages`` () = task {
+    use lab = new Lab()
+    let configured = options lab "" ""
+    for age in [ None; Some 30.0 ] do
+        let writer = Fanion.Coordinator.Coordinator(configured, CancellationToken.None, ?maxObservationAge = age)
+        let reader = Fanion.Query.ManagedStore(lab.Root, lab.Config, configured.Engine, "", ?maxObservationAge = age)
+        do! reader.CloseAsync()
+        let expected = defaultArg age Fanion.IndexState.maxObservationAgeDefault
+        Assert.Equal(expected, writer.State.MaxObservationAge)
+        Assert.Equal(expected, reader.State.MaxObservationAge)
+}
+
+[<Fact>]
 let ``changed peers refresh all crosslinks while unchanged dependent components are reused`` () =
     match environment () with
     | None -> ()  // engine not configured for this run

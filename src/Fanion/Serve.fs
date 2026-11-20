@@ -7,6 +7,7 @@ open System.IO
 open System.Security.Cryptography
 open System.Text
 open Fidelity.Data.JSON
+open System.Threading
 open System.Threading.Tasks
 open System.Collections.Generic
 open Microsoft.AspNetCore.Builder
@@ -23,7 +24,7 @@ open Fanion.English
 
 type Options =
     { Root: string; Config: string; Engine: Load.Engine; PromptFile: string; Token: string; WebhookSecret: byte[] option
-      Host: string; Port: int; Model: ModelClient option }
+      Host: string; Port: int; Model: ModelClient option; Observers: Requests.ObserverOptions }
 
 let private fields : (string * (string list * string list)) list =
     [ "remit", ([], []); "schema", ([], []); "find", ([ "query"; "snapshot_id" ], [ "repo"; "limit"; "corpus_layer" ])
@@ -108,15 +109,51 @@ let private dispatch (ctx: Ctx) (payload: JsonValue) (cancellation: System.Threa
     | _ -> return raise (QueryError "action")
 }
 
-/// The host owns the notification lifetime, including a nonzero stop on failure.
-let runWithChanges (createChanges: string -> IndexState.Changes) (options: Options) : int =
+// Server-sent readiness frames: authenticated, admitted by Requests, framed here.
+let observe (token: string) (requests: Requests.Service) (logger: ILogger) (context: HttpContext) : Task =
+    task {
+        let authorized = fixedTimeEquals (header context.Request "authorization") ("Bearer " + token)
+        if not authorized then do! json context 401 (Obj [ "error", Str "Unauthorized" ])
+        else
+            let response = context.Response
+            let write (text: string) (ct: System.Threading.CancellationToken) : Task = task {
+                ct.ThrowIfCancellationRequested()
+                if not response.HasStarted then
+                    response.StatusCode <- 200
+                    response.ContentType <- "text/event-stream; charset=utf-8"
+                    response.Headers.CacheControl <- "no-cache, no-store"
+                    response.Headers.["X-Accel-Buffering"] <- "no"
+                let bytes = Encoding.UTF8.GetBytes text
+                do! response.Body.WriteAsync(bytes, 0, bytes.Length, ct)
+                do! response.Body.FlushAsync ct
+            }
+            let sink : Requests.ObserverSink =
+                { Emit = fun ready ct -> write ("event: readiness\ndata: " + toText orderedCompactStyle (Requests.readinessJ ready) + "\n\n") ct
+                  Keepalive = fun ct -> write ": keepalive\n\n" ct }
+            try do! requests.Observe(sink, context.RequestAborted)
+            with
+            | EnglishError(code, status, retryable) when not response.HasStarted ->
+                do! json context status (Obj [ "error", Str code; "retryable", Bool retryable ])
+            | _ when context.RequestAborted.IsCancellationRequested -> ()
+            | EnglishError("observer_write_timeout", _, _) -> context.Abort()
+            | error when not response.HasStarted ->
+                logger.LogError(error, "Retrieval observation failed")
+                do! json context 503 (Obj [ "error", Str "retrieval_unavailable"; "retryable", Bool true ])
+            | error ->
+                // Headers are sent: the stream ends after any terminal frame the service could write.
+                logger.LogError(error, "Retrieval observation stream ended")
+    } :> Task
+
+// The host owns the notification lifetime, including a nonzero stop on failure.
+let runWithChangesAsync (createChanges: string -> IndexState.Changes) (configure: WebApplicationBuilder -> unit) (cancellation: CancellationToken) (options: Options) : Task<int> = task {
     let store = ManagedStore(options.Root, options.Config, options.Engine, options.PromptFile)
     use changes = createChanges (Path.Combine(options.Root, "index-state.sqlite"))
     let english = EnglishService(store, options.Model)
     let requestCtx : Requests.Ctx =
-        { Readiness = store.ReadinessAsync; WatchReadiness = changes.Watch; Sources = store.ConfiguredSources
+        { Readiness = store.ReadinessAsync; WatchReadiness = changes.Watch; Observe = (fun cursor ct -> store.ObserveAsync(cursor, ct)); Sources = store.ConfiguredSources
+          WatchFailure = changes.Failure; WhileWatchHealthy = changes.WhileHealthy
           Evaluate = fun q snapshot ct -> english.AskAsync(q.Text, Some snapshot, q.Limit, q.MaxChars, q.IncludeContext, q.IncludeQuery, q.IncludeResults, ct) }
-    let requests = new Requests.Service(requestCtx)
+    let requests = new Requests.Service(requestCtx, options.Observers)
     let builder = WebApplication.CreateBuilder()
     builder.WebHost.UseUrls(sprintf "http://%s:%d" options.Host options.Port) |> ignore
     builder.Logging.ClearProviders() |> ignore
@@ -124,6 +161,7 @@ let runWithChanges (createChanges: string -> IndexState.Changes) (options: Optio
     builder.Logging.SetMinimumLevel(LogLevel.Warning) |> ignore
     builder.WebHost.ConfigureKestrel(fun (kestrel: KestrelServerOptions) -> kestrel.AddServerHeader <- false; kestrel.Limits.MaxRequestBodySize <- Nullable 1048576L) |> ignore
     builder.Services.AddRouting().AddOxpecker() |> ignore
+    configure builder
     let app = builder.Build()
     let ctx = { Options = options; Store = store; English = english; Requests = requests; Logger = app.Logger }
     let logger = ctx.Logger
@@ -215,15 +253,29 @@ let runWithChanges (createChanges: string -> IndexState.Changes) (options: Optio
                         do! json context 503 (Obj [ "error", Str "Graph generation unavailable" ])
         } :> Task
 
-    let routes = [ GET [ route "/health" (health ctx) ]; POST [ route "/v1/retrieval" (retrieval ctx); route "/v1/index/events/forgejo" (index ctx) ] ]
+    let routes = [ GET [ route "/health" (health ctx); route "/v1/retrieval/observe" (observe options.Token requests logger) ]; POST [ route "/v1/retrieval" (retrieval ctx); route "/v1/index/events/forgejo" (index ctx) ] ]
     app.UseRouting().UseOxpecker(routes).Run(Default.notFoundHandler)
-    app.Lifetime.ApplicationStopping.Register(fun () -> requests.Close().GetAwaiter().GetResult(); store.Close()) |> ignore
-    let running = app.RunAsync()
-    Task.WhenAny(running, changes.Failure :> Task).GetAwaiter().GetResult() |> ignore
-    if changes.Failure.IsCompleted then
+    use stopping = app.Lifetime.ApplicationStopping.Register(Action requests.BeginStop)
+    let running = app.RunAsync(cancellation)
+    let! _ = Task.WhenAny(running, changes.Failure :> Task)
+    let failed = changes.Failure.IsCompletedSuccessfully
+    if failed then
         logger.LogCritical(changes.Failure.Result, "Publication notifications failed; stopping for supervised restart")
         app.Lifetime.StopApplication()
-    running.GetAwaiter().GetResult()
-    if changes.Failure.IsCompleted then 1 else 0
+    let! ended = task {
+        try
+            do! running
+            return None
+        with error -> return Some error
+    }
+    do! requests.Close()
+    do! store.CloseAsync()
+    match ended with
+    | Some error -> return raise error
+    | None -> return if changes.Failure.IsCompletedSuccessfully then 1 else 0
+}
 
-let run (options: Options) : int = runWithChanges (fun path -> new IndexState.Changes(path)) options
+let run (options: Options) : int =
+    runWithChangesAsync (fun path -> new IndexState.Changes(path)) ignore CancellationToken.None options
+    |> Async.AwaitTask
+    |> Async.RunSynchronously
