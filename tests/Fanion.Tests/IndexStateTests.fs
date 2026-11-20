@@ -32,7 +32,7 @@ type Fixture() =
     member _.Allowed = [ "spec", []; "site", [ "spec" ]; "search", [ "site" ]; "other", [] ]
     member _.Heads = [ "spec", Some(rev 'a' 40); "site", Some(rev 'b' 40); "search", Some(rev 'c' 40); "other", Some(rev 'd' 64) ]
     member this.State = State(this.Path, this.Allowed, leaseSeconds = 10.0, clock = this.Clock.Now)
-    member this.Reopen(?lease: float) = State(this.Path, this.Allowed, ?leaseSeconds = lease, clock = this.Clock.Now)
+    member this.Reopen(?lease: float, ?settle: float, ?maxSettle: float) = State(this.Path, this.Allowed, ?leaseSeconds = lease, clock = this.Clock.Now, ?settleSeconds = settle, ?maxSettleSeconds = maxSettle)
     member this.PublishInitial(state: State) =
         state.ObserveHeads(this.Heads, this.Clock.Now()) |> ignore
         let plan = state.PendingPlan()
@@ -78,22 +78,22 @@ let ``plan settle window follows real head changes and is bounded`` () =
     Assert.Throws<StateError>(fun () -> State(f.Path, f.Allowed, clock = f.Clock.Now, settleSeconds = 10.0, maxSettleSeconds = 5.0) |> ignore) |> ignore
 
 [<Fact>]
-let ``default settle coalesces pushes briefly with a one second ceiling`` () =
+let ``default settle coalesces pushes with a three second quiet and fifteen second ceiling`` () =
     use f = new Fixture()
     let state = f.State
-    Assert.Equal(0.25, state.SettleSeconds)
-    Assert.Equal(1.0, state.MaxSettleSeconds)
+    Assert.Equal(3.0, state.SettleSeconds)
+    Assert.Equal(15.0, state.MaxSettleSeconds)
     state.ObserveHeads(f.Heads, f.Clock.Now()) |> ignore
-    Assert.Equal(Some 1000.25, state.PendingPlan().SettleUntil)
-    state.ObserveHeads([ "spec", Some(rev 'e' 40) ], f.Clock.Advance(0.9)) |> ignore
-    Assert.Equal(Some 1001.0, state.PendingPlan().SettleUntil)
+    Assert.Equal(Some 1003.0, state.PendingPlan().SettleUntil)
+    state.ObserveHeads([ "spec", Some(rev 'e' 40) ], f.Clock.Advance(13.0)) |> ignore
+    Assert.Equal(Some 1015.0, state.PendingPlan().SettleUntil)
 
 [<Theory>]
 [<InlineData(false)>]
 [<InlineData(true)>]
 let ``five same or mixed source pushes retain the first dirty deadline`` mixed =
     use f = new Fixture()
-    let state = f.State
+    let state = f.Reopen(lease = 10.0, settle = 0.25, maxSettle = 1.0)
     f.PublishInitial state |> ignore
     let first = f.Clock.Advance(10.0)
     let sources = if mixed then [ "spec"; "site"; "other"; "search"; "spec" ] else List.replicate 5 "spec"
@@ -101,7 +101,7 @@ let ``five same or mixed source pushes retain the first dirty deadline`` mixed =
         f.Clock.Value <- first + float i * 0.225
         state.ObserveHeads([ source, Some(rev "ef012".[i] 40) ], f.Clock.Now()) |> ignore
         Assert.Equal(Some(min (f.Clock.Now() + 0.25) (first + 1.0)), state.PendingPlan().SettleUntil)
-    let reopened = f.Reopen()
+    let reopened = f.Reopen(settle = 0.25, maxSettle = 1.0)
     Assert.Equal(Some(first + 1.0), reopened.PendingPlan().SettleUntil)
     let plan = reopened.PendingPlan()
     reopened.CompleteBuild(reopened.StartBuild plan, rev '2' 64, targets plan) |> ignore
@@ -120,17 +120,17 @@ let ``reverted head clears its old batch while deletion and invalidation retain 
     Assert.True(state.PendingPlan().SettleUntil.IsNone)
     let first = f.Clock.Advance(10.0)
     state.ObserveHeads([ "spec", Some(rev 'e' 40) ], first) |> ignore
-    Assert.Equal(Some(first + 0.25), state.PendingPlan().SettleUntil)
-    state.ObserveHeads([ "spec", None ], f.Clock.Advance(0.9)) |> ignore
-    Assert.Equal(Some(first + 1.0), state.PendingPlan().SettleUntil)
+    Assert.Equal(Some(first + 3.0), state.PendingPlan().SettleUntil)
+    state.ObserveHeads([ "spec", None ], f.Clock.Advance(13.0)) |> ignore
+    Assert.Equal(Some(first + 15.0), state.PendingPlan().SettleUntil)
     let plan = state.PendingPlan()
     state.CompleteBuild(state.StartBuild plan, rev '2' 64, targets plan) |> ignore
     let invalidated = f.Clock.Advance(10.0)
     state.InvalidateSources([ "spec" ], "policy changed") |> ignore
-    Assert.Equal(Some(invalidated + 0.25), state.PendingPlan().SettleUntil)
-    f.Clock.Advance(0.9) |> ignore
+    Assert.Equal(Some(invalidated + 3.0), state.PendingPlan().SettleUntil)
+    f.Clock.Advance(13.0) |> ignore
     state.InvalidateSources([ "spec" ], "another policy change") |> ignore
-    Assert.Equal(Some(invalidated + 1.0), state.PendingPlan().SettleUntil)
+    Assert.Equal(Some(invalidated + 15.0), state.PendingPlan().SettleUntil)
 
 [<Fact>]
 let ``legacy state migration seeds first dirty time from changed time`` () =
@@ -146,8 +146,8 @@ let ``legacy state migration seeds first dirty time from changed time`` () =
     command.CommandText <- "ALTER TABLE sources DROP COLUMN first_changed_at"
     command.ExecuteNonQuery() |> ignore
     let reopened = f.Reopen()
-    reopened.ObserveHeads([ "spec", Some(rev 'f' 40) ], f.Clock.Advance(0.9)) |> ignore
-    Assert.Equal(Some(first + 1.0), reopened.PendingPlan().SettleUntil)
+    reopened.ObserveHeads([ "spec", Some(rev 'f' 40) ], f.Clock.Advance(13.0)) |> ignore
+    Assert.Equal(Some(first + 15.0), reopened.PendingPlan().SettleUntil)
 
 [<Fact>]
 let ``separate state writer broadcasts even before observers await`` () = task {
@@ -374,7 +374,36 @@ let ``hint arriving during fetch is not acknowledged by old observation`` () =
     Assert.True(bool' (state.Freshness(rev '1' 64, 30.0)) "fresh")
 
 [<Fact>]
-let ``concurrent desired advancement supersedes build`` () =
+let ``concurrent base generation advancement supersedes stale build`` () =
+    use f = new Fixture()
+    let state = f.State
+    f.PublishInitial state |> ignore
+    state.ObserveHeads([ "spec", Some(rev 'e' 40) ], f.Clock.Advance()) |> ignore
+    let plan1 = state.PendingPlan()
+    let token1 = state.StartBuild plan1
+    // Expire token1 so a second builder publishes generation 2 on the same base generation 1.
+    f.Clock.Advance(11.0) |> ignore
+    let plan2 = state.PendingPlan()
+    let token2 = state.StartBuild plan2
+    Assert.True(bool' (state.CompleteBuild(token2, rev '2' 64, targets plan2)) "published")
+    // Fault injection: restore token1 to running with a future lease to exercise the base-generation fence directly.
+    do
+        use connection = new Microsoft.Data.Sqlite.SqliteConnection("Data Source=" + f.Path)
+        connection.Open()
+        use command = connection.CreateCommand()
+        command.CommandText <- "UPDATE builds SET status='running',lease_until=$l,finished_at=NULL WHERE token=$t"
+        command.Parameters.AddWithValue("$l", f.Clock.Now() + 60.0) |> ignore
+        command.Parameters.AddWithValue("$t", token1) |> ignore
+        Assert.Equal(1, command.ExecuteNonQuery())
+    let result = state.CompleteBuild(token1, rev '9' 64, targets plan1)
+    Assert.Equal("superseded", str' result "status")
+    Assert.False(bool' result "published")
+    Assert.True(bool' result "retry")
+    Assert.Equal(2L, state.ActiveGeneration().Value.Generation)
+    Assert.Equal(rev '2' 64, state.ActiveGeneration().Value.SnapshotId)
+
+[<Fact>]
+let ``mid staging push on another source publishes n+1 and queues n+2`` () =
     use f = new Fixture()
     let state = f.State
     f.PublishInitial state |> ignore
@@ -384,25 +413,72 @@ let ``concurrent desired advancement supersedes build`` () =
     let other = f.Reopen()
     other.ObserveHeads([ "other", Some(rev 'f' 64) ], f.Clock.Advance()) |> ignore
     let result = state.CompleteBuild(token, rev '2' 64, targets plan)
-    Assert.Equal("superseded", str' result "status")
-    Assert.False(bool' result "published")
-    Assert.Equal(rev '1' 64, str' (state.Freshness(rev '1' 64, 30.0)) "current_snapshot_id")
-    Assert.Equal<Set<string>>(set [ "spec"; "site"; "search"; "other" ], state.PendingPlan().Targets.Keys |> Set.ofSeq)
+    Assert.Equal("completed", str' result "status")
+    Assert.True(bool' result "published")
+    Assert.Equal(Int 2L, field result "generation")
+    let gen2 = state.ActiveGeneration().Value
+    Assert.Equal(2L, gen2.Generation)
+    Assert.Equal(Some(rev 'e' 40), gen2.Revisions.["spec"])
+    Assert.Equal(Some(rev 'd' 64), gen2.Revisions.["other"])
+    let freshness = state.Freshness(rev '2' 64, 30.0)
+    Assert.False(bool' freshness "fresh")
+    Assert.Equal<string list>([ "other" ], strings freshness "pending_sources")
+    let nextPlan = state.PendingPlan()
+    Assert.Equal(Some 2L, nextPlan.BaseGeneration)
+    Assert.Equal<Set<string>>(set [ "other" ], nextPlan.Targets.Keys |> Set.ofSeq)
+    Assert.Equal(Some(rev 'f' 64), nextPlan.Targets.["other"])
+    let n2 = state.CompleteBuild(state.StartBuild nextPlan, rev '3' 64, targets nextPlan)
+    Assert.True(bool' n2 "published")
+    Assert.Equal(Int 3L, field n2 "generation")
+    Assert.True(bool' (state.Freshness(rev '3' 64, 30.0)) "fresh")
 
 [<Fact>]
-let ``advance then return still invalidates old build fence`` () =
+let ``mid staging push on target source preserves dirty timestamps and queues n+2 including tombstones`` () =
     use f = new Fixture()
     let state = f.State
     f.PublishInitial state |> ignore
-    state.ObserveHeads([ "spec", Some(rev 'e' 40) ], f.Clock.Advance()) |> ignore
+    let t1 = f.Clock.Advance()
+    state.ObserveHeads([ "spec", Some(rev 'e' 40) ], t1) |> ignore
     let plan = state.PendingPlan()
     let token = state.StartBuild plan
-    state.ObserveHeads([ "spec", Some(rev 'f' 40) ], f.Clock.Advance()) |> ignore
+    let t2 = f.Clock.Advance()
+    state.ObserveHeads([ "spec", Some(rev 'f' 40) ], t2) |> ignore
+    let n1 = state.CompleteBuild(token, rev '2' 64, targets plan)
+    Assert.True(bool' n1 "published")
+    Assert.Equal(Int 2L, field n1 "generation")
+    Assert.Equal(Some(rev 'e' 40), state.ActiveGeneration().Value.Revisions.["spec"])
+    let freshness = state.Freshness(rev '2' 64, 30.0)
+    Assert.False(bool' freshness "fresh")
+    Assert.Equal<string list>([ "search"; "site"; "spec" ], strings freshness "pending_sources")
+    let nextPlan = state.PendingPlan()
+    Assert.Equal(Some 2L, nextPlan.BaseGeneration)
+    Assert.Equal(Some(rev 'f' 40), nextPlan.Targets.["spec"])
+    Assert.Equal(Some(min (t2 + state.SettleSeconds) (t1 + state.MaxSettleSeconds)), nextPlan.SettleUntil)
+    let n2 = state.CompleteBuild(state.StartBuild nextPlan, rev '3' 64, targets nextPlan)
+    Assert.True(bool' n2 "published")
+    Assert.True(bool' (state.Freshness(rev '3' 64, 30.0)) "fresh")
+    Assert.True(state.PendingPlan().SettleUntil.IsNone)
+    // Tombstone (NULL) matching via SQLite IS clears dirty timestamps cleanly when unchanged,
+    // and keeps them when a revision changes to NULL mid-staging.
+    state.ObserveHeads([ "spec", None ], f.Clock.Advance()) |> ignore
+    let tombPlan = state.PendingPlan()
+    Assert.True(bool' (state.CompleteBuild(state.StartBuild tombPlan, rev '4' 64, targets tombPlan)) "published")
+    Assert.True(bool' (state.Freshness(rev '4' 64, 30.0)) "fresh")
+    Assert.True(state.PendingPlan().SettleUntil.IsNone)
     state.ObserveHeads([ "spec", Some(rev 'e' 40) ], f.Clock.Advance()) |> ignore
-    Assert.Equal("superseded", str' (state.CompleteBuild(token, rev '2' 64, targets plan)) "status")
+    let revPlan = state.PendingPlan()
+    let revToken = state.StartBuild revPlan
+    state.ObserveHeads([ "spec", None ], f.Clock.Advance()) |> ignore
+    Assert.True(bool' (state.CompleteBuild(revToken, rev '5' 64, targets revPlan)) "published")
+    Assert.False(bool' (state.Freshness(rev '5' 64, 30.0)) "fresh")
+    let followTomb = state.PendingPlan()
+    Assert.True(followTomb.Targets.["spec"].IsNone)
+    Assert.True(followTomb.SettleUntil.IsSome)
+    Assert.True(bool' (state.CompleteBuild(state.StartBuild followTomb, rev '6' 64, targets followTomb)) "published")
+    Assert.True(bool' (state.Freshness(rev '6' 64, 30.0)) "fresh")
 
 [<Fact>]
-let ``unobserved hint during build prevents publication`` () =
+let ``unobserved hint during build publishes n+1 while gating n+2 on observation`` () =
     use f = new Fixture()
     let state = f.State
     f.PublishInitial state |> ignore
@@ -410,8 +486,16 @@ let ``unobserved hint during build prevents publication`` () =
     let plan = state.PendingPlan()
     let token = state.StartBuild plan
     state.EventHint("late", "site", "site_deploy") |> ignore
-    Assert.Equal("superseded", str' (state.CompleteBuild(token, rev '2' 64, targets plan)) "status")
+    let n1 = state.CompleteBuild(token, rev '2' 64, targets plan)
+    Assert.True(bool' n1 "published")
+    Assert.Equal("completed", str' n1 "status")
+    Assert.Equal(Int 2L, field n1 "generation")
+    let freshness = state.Freshness(rev '2' 64, 30.0)
+    Assert.False(bool' freshness "fresh")
+    Assert.Equal<string list>([ "site" ], strings freshness "observation_required")
     Assert.Throws<StateError>(fun () -> state.StartBuild(state.PendingPlan()) |> ignore) |> ignore
+    state.ObserveHeads([ "site", Some(rev 'b' 40) ], f.Clock.Advance()) |> ignore
+    Assert.True(bool' (state.Freshness(rev '2' 64, 30.0)) "fresh")
 
 [<Fact>]
 let ``failed build keeps old generation but latest rejects and retry works`` () =
@@ -552,10 +636,14 @@ let ``active generation and explicit invalidation fence`` () =
     let plan = state.PendingPlan()
     let token = state.StartBuild plan
     state.InvalidateSources([ "spec" ], "extractor changed again") |> ignore
-    Assert.Equal("superseded", str' (state.CompleteBuild(token, rev '2' 64, targets plan)) "status")
+    let firstInvalidated = state.CompleteBuild(token, rev '2' 64, targets plan)
+    Assert.True(bool' firstInvalidated "published")
+    Assert.Equal(Int 2L, field firstInvalidated "generation")
+    Assert.False(bool' (state.Freshness(rev '2' 64, 30.0)) "fresh")
     let retry = state.PendingPlan()
+    Assert.Equal(Some 2L, retry.BaseGeneration)
     state.CompleteBuild(state.StartBuild retry, rev '2' 64, targets retry) |> ignore
     Assert.True(bool' (state.Freshness(rev '2' 64, 30.0)) "fresh")
-    Assert.Equal(2L, state.ActiveGeneration().Value.Generation)
+    Assert.Equal(3L, state.ActiveGeneration().Value.Generation)
     for (sources, reason) in [ [], "x"; [ "unknown" ], "x"; [ "spec"; "spec" ], "x"; [ "spec" ], ""; [ "spec" ], String('x', 1025) ] do
         Assert.Throws<StateError>(fun () -> state.InvalidateSources(sources, reason) |> ignore) |> ignore

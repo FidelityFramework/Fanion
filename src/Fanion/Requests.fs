@@ -38,10 +38,15 @@ type FreshReadiness =
 
 type IndexingReadiness =
     { Generation: int64; SnapshotId: string; PendingSources: string list; StaleSources: string list
-      Reasons: string list; ChangedAtMs: int64 option }
+      Reasons: string list; ChangedAtMs: int64 option; QueuedRetrievals: int }
+
+type CrossingHeldReadiness =
+    { Generation: int64; SnapshotId: string; ExpectedSources: string list; PendingSources: string list
+      StaleSources: string list; Reasons: string list; HeldUntilMs: int64 option; QueuedRetrievals: int; ChangedAtMs: int64 option }
 
 type RetrievalReadiness =
     | Fresh of FreshReadiness
+    | CrossingHeld of CrossingHeldReadiness
     | Indexing of IndexingReadiness
     | Unavailable of Reason: string
 
@@ -53,11 +58,19 @@ let readinessJ (frame: RetrievalReadiness) : J =
         Obj [ "state", Str "fresh"; "generation", Int ready.Generation; "snapshot_id", Str ready.SnapshotId
               "published_at_ms", Int ready.PublishedAtMs
               "revisions", Obj [ for kv in ready.Revisions -> kv.Key, (match kv.Value with Some r -> Str r | None -> Null) ] ]
+    | CrossingHeld held ->
+        Obj [ "state", Str "crossing_held"; "generation", Int held.Generation; "snapshot_id", Str held.SnapshotId
+              "expected_sources", strings held.ExpectedSources; "pending_sources", strings held.PendingSources
+              "stale_sources", strings held.StaleSources; "reasons", strings held.Reasons
+              "held_until_ms", (match held.HeldUntilMs with Some at -> Int at | None -> Null)
+              "queued_retrievals", Int (int64 held.QueuedRetrievals)
+              "changed_at_ms", (match held.ChangedAtMs with Some at -> Int at | None -> Null) ]
     | Indexing pending ->
         Obj [ "state", Str "indexing"; "generation", Int pending.Generation; "snapshot_id", Str pending.SnapshotId
               "pending_sources", strings pending.PendingSources; "stale_sources", strings pending.StaleSources
               "reasons", strings pending.Reasons
-              "changed_at_ms", (match pending.ChangedAtMs with Some at -> Int at | None -> Null) ]
+              "changed_at_ms", (match pending.ChangedAtMs with Some at -> Int at | None -> Null)
+              "queued_retrievals", Int (int64 pending.QueuedRetrievals) ]
     | Unavailable reason -> Obj [ "state", Str "unavailable"; "reason", Str reason ]
 
 // The transport owns framing; the service owns admission, ordering, deadlines and lifetime.
@@ -70,6 +83,13 @@ type ObserverOptions =
 
 let defaultObserverOptions =
     { Capacity = 16; QueueDepth = 32; KeepaliveInterval = TimeSpan.FromSeconds 15.0; WriteTimeout = TimeSpan.FromSeconds 10.0 }
+
+type QueueOptions =
+    { MaxQueued: int; DefaultWaitTimeout: TimeSpan; MaxWaitTimeout: TimeSpan; MaxConcurrentReads: int }
+
+let defaultQueueOptions =
+    { MaxQueued = 64; DefaultWaitTimeout = TimeSpan.FromSeconds 240.0
+      MaxWaitTimeout = TimeSpan.FromSeconds 240.0; MaxConcurrentReads = 8 }
 
 // Why the producer ended one observer's delivery.
 type private Terminal =
@@ -90,32 +110,89 @@ let private milliseconds (seconds: float) = int64 (Math.Round(seconds * 1000.0))
 type private Job =
     { Id: uint64; Question: Question; Snapshot: string; mutable Consumers: int }
 
+type private Waiter =
+    { Ticket: int64
+      mutable BecomeHead: TaskCompletionSource<unit>
+      mutable Demoted: TaskCompletionSource<unit>
+      mutable Parked: bool
+      mutable Removed: bool }
+
+type private QueueReservation =
+    { Ticket: int64
+      mutable Held: bool }
+
+type private QueueLane =
+    { WaitQueue: LinkedList<Waiter>
+      InFlightTickets: SortedSet<int64>
+      mutable InFlightChanged: TaskCompletionSource<unit> }
+
 /// One bounded epoch retains at most 128 exact answers. Rotation joins the old
 /// host before discarding its payloads, including canceled attempts and tombstones.
 /// No caller can cancel another caller's demand or occupy the GPU while indexing.
-type Service(ctx: Ctx, observerOptions: ObserverOptions) =
+type Service(ctx: Ctx, observerOptions: ObserverOptions, ?queueOptions: QueueOptions, ?nextDeadline: unit -> TimeSpan option) =
+    let queueOptions = defaultArg queueOptions defaultQueueOptions
+    let nextDeadline = defaultArg nextDeadline (fun () -> None)
     do
         if observerOptions.Capacity < 1 || observerOptions.QueueDepth < 1 || observerOptions.KeepaliveInterval <= TimeSpan.Zero || observerOptions.WriteTimeout <= TimeSpan.Zero then
             invalidArg (nameof observerOptions) "Observer capacity, queue depth, keepalive interval and write timeout must be positive"
+        if queueOptions.MaxQueued < 1 || queueOptions.DefaultWaitTimeout <= TimeSpan.Zero || queueOptions.MaxWaitTimeout < queueOptions.DefaultWaitTimeout || queueOptions.MaxConcurrentReads < 1 then
+            invalidArg (nameof queueOptions) "Queue limits and wait timeouts must be positive and bounded by MaxWaitTimeout"
     let gate = new SemaphoreSlim(1, 1)
     let admission = new SemaphoreSlim(64, 64)
+    let readConcurrency = new SemaphoreSlim(queueOptions.MaxConcurrentReads, queueOptions.MaxConcurrentReads)
     let observers = new SemaphoreSlim(observerOptions.Capacity, observerOptions.Capacity)
     let lifetime = new CancellationTokenSource()
     let jobs = Dictionary<Question * string, Job>()
     let inputs = ConcurrentDictionary<ValueToken, Job>()
     let outputs = ConcurrentDictionary<ValueToken, Result<J, exn>>()
-    let mutable serial, epoch, allocated, consumers, observing = 0UL, 0UL, 0, 0, 0
+    let queueGate = obj ()
+    let signal () = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+    let mkLane () = { WaitQueue = LinkedList<Waiter>(); InFlightTickets = SortedSet<int64>(); InFlightChanged = signal () }
+    let readLane = mkLane ()
+    let askLane = mkLane ()
+    let mutable serial, epoch, allocated, consumers, observing, parkedCount, queuedCount, activeRequests = 0UL, 0UL, 0, 0, 0, 0, 0, 0
+    let mutable nextTicket, reservedQueueSlots, pinnedWaitingCount, optOutWaitingCount = 0L, 0, 0, 0
     let mutable closing = false
     let isClosing () = Volatile.Read(&closing)
     let enterObserver () = Interlocked.Increment(&observing) |> ignore
     let leaveObserver () = Interlocked.Decrement(&observing) |> ignore
-    let signal () = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
     let stopping = signal ()
+    let waiterAbortCts = new CancellationTokenSource()
+    let mutable queueChanged = signal ()
+    let mutable requestsDrained = signal ()
+    let watchQueue () = lock queueGate (fun () -> queueChanged.Task)
+    let notifyQueueChanged () =
+        let previous = queueChanged
+        queueChanged <- signal ()
+        previous.TrySetResult() |> ignore
+    let notifyInFlightChangedLocked (lane: QueueLane) =
+        let previous = lane.InFlightChanged
+        lane.InFlightChanged <- signal ()
+        previous.TrySetResult() |> ignore
+    let hasOlderInFlightLocked (lane: QueueLane) (ticket: int64) =
+        lane.InFlightTickets.Count > 0 && lane.InFlightTickets.Min < ticket
+    let enterRequest () =
+        if isClosing () then raise (EnglishError("retrieval_stopping", 503, false))
+        lock queueGate (fun () ->
+            if isClosing () then raise (EnglishError("retrieval_stopping", 503, false))
+            activeRequests <- activeRequests + 1
+            if activeRequests = 1 && requestsDrained.Task.IsCompleted then requestsDrained <- signal ())
+    let leaveRequest () =
+        lock queueGate (fun () ->
+            activeRequests <- activeRequests - 1
+            if activeRequests = 0 then requestsDrained.TrySetResult() |> ignore)
     let cancelLifetime = Lazy<Task>((fun () -> lifetime.CancelAsync()), LazyThreadSafetyMode.ExecutionAndPublication)
     let beginStop () =
         Volatile.Write(&closing, true)
         stopping.TrySetResult() |> ignore
+        try waiterAbortCts.Cancel() with :? ObjectDisposedException -> ()
         cancelLifetime.Value |> ignore
+    let _ =
+        ctx.WatchFailure.ContinueWith(
+            Action<Task<exn>>(fun _ -> try waiterAbortCts.Cancel() with :? ObjectDisposedException -> ()),
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default)
     let mutable epochReleased = signal ()
     let field value name = match value with Obj pairs -> pairs |> List.tryPick (fun (k, v) -> if k = name then Some v else None) | _ -> None
     let next () = serial <- serial + 1UL; serial
@@ -159,13 +236,21 @@ type Service(ctx: Ctx, observerOptions: ObserverOptions) =
         observed, published)
     let readiness ct = task {
         let! current = ctx.Readiness ct
+        let reasons =
+            match field current "reasons" with
+            | Some(Arr items) -> items |> List.choose (function Str s -> Some s | _ -> None)
+            | _ -> []
+        if List.contains "corpus_configuration_changed" reasons then
+            raise (EnglishError("corpus_configuration_changed", 409, true))
         return lock projectionGate (fun () -> projection.Run(fun () -> observed.Value <- current; current, published.Value))
     }
     // Observers share the same signal and fence. The memo shapes frames only;
     // the coherent sample carries the generation row and timing beside it.
     let sampled = projection.Run(fun () -> createSignal (None: IndexState.Observation option))
+    let queued = projection.Run(fun () -> createSignal 0)
     let frame = projection.Run(fun () -> createMemo(fun _ ->
         let ready = observed.Value
+        let queuedRetrievals = queued.Value
         let strings name =
             match field ready name with
             | Some(Arr items) -> let names = items |> List.choose (function Str s -> Some s | _ -> None) in if names.Length = items.Length then Some names else None
@@ -173,17 +258,27 @@ type Service(ctx: Ctx, observerOptions: ObserverOptions) =
         match sampled.Value with
         | None -> Error "Malformed retrieval readiness sample"
         | Some sample ->
-            match sample.Active, published.Value with
-            | None, _ -> Ok(Unavailable "no_published_generation")
-            | Some active, Some snapshot when snapshot = active.SnapshotId ->
+            match sample.Active, published.Value, sample.Crossing with
+            | None, _, _ -> Ok(Unavailable "no_published_generation")
+            | Some active, _, Some crossing ->
+                match strings "stale_sources", strings "reasons" with
+                | Some stale, Some reasons ->
+                    Ok(CrossingHeld { Generation = active.Generation; SnapshotId = active.SnapshotId
+                                      ExpectedSources = crossing.ExpectedSources; PendingSources = crossing.PendingSources
+                                      StaleSources = stale; Reasons = reasons
+                                      HeldUntilMs = Some(milliseconds crossing.HeldUntil)
+                                      QueuedRetrievals = queuedRetrievals
+                                      ChangedAtMs = sample.ChangedAt |> Option.map milliseconds })
+                | _ -> Error "Malformed retrieval readiness sample"
+            | Some active, Some snapshot, None when snapshot = active.SnapshotId ->
                 Ok(Fresh { Generation = active.Generation; SnapshotId = snapshot; PublishedAtMs = milliseconds active.PublishedAt; Revisions = active.Revisions })
-            | Some active, None ->
+            | Some active, None, None ->
                 match strings "pending_sources", strings "stale_sources", strings "reasons" with
                 | Some pending, Some stale, Some reasons ->
                     Ok(Indexing { Generation = active.Generation; SnapshotId = active.SnapshotId; PendingSources = pending; StaleSources = stale
-                                  Reasons = reasons; ChangedAtMs = sample.ChangedAt |> Option.map milliseconds })
+                                  Reasons = reasons; ChangedAtMs = sample.ChangedAt |> Option.map milliseconds; QueuedRetrievals = queuedRetrievals })
                 | _ -> Error "Malformed retrieval readiness sample"
-            | Some _, Some _ -> Error "Malformed retrieval readiness sample"))
+            | Some _, Some _, None -> Error "Malformed retrieval readiness sample"))
     let sampleOnce cursor ct = task {
         try
             let! sample = ctx.Observe cursor ct
@@ -193,11 +288,13 @@ type Service(ctx: Ctx, observerOptions: ObserverOptions) =
             return Error(Failed("graph_generation_unavailable", error))
     }
     let project (sample: IndexState.Observation) =
+        let currentQueued = Volatile.Read(&queuedCount)
         let projected =
             lock projectionGate (fun () ->
                 projection.Run(fun () ->
                     observed.Value <- sample.Freshness
                     sampled.Value <- Some sample
+                    queued.Value <- currentQueued
                     frame.Value))
         match projected with
         | Ok ready -> ready
@@ -294,6 +391,7 @@ type Service(ctx: Ctx, observerOptions: ObserverOptions) =
         while not ct.IsCancellationRequested && not (isClosing ()) && not (watcherFailed ()) do
             let active, members = lock registryGate (fun () -> registry.Count > 0, membership.Task)
             if active then
+                let queuedSignal = watchQueue ()
                 let mutable changed : Task<unit> option = None
                 let mutable watchError : exn option = None
                 try
@@ -331,7 +429,7 @@ type Service(ctx: Ctx, observerOptions: ObserverOptions) =
                                     | None -> Timeout.InfiniteTimeSpan
                                 try
                                     let expiry = Task.Delay(delay, pause.Token)
-                                    let! _ = Task.WhenAny(next :> Task, expiry, members :> Task, ctx.WatchFailure :> Task, stopping.Task :> Task)
+                                    let! _ = Task.WhenAny(next :> Task, expiry, members :> Task, queuedSignal :> Task, ctx.WatchFailure :> Task, stopping.Task :> Task)
                                     ()
                                 finally pause.Cancel()
                             elif not (isClosing ()) && not (watcherFailed ()) then
@@ -344,8 +442,8 @@ type Service(ctx: Ctx, observerOptions: ObserverOptions) =
                                     let delay = if frozen then Timeout.InfiniteTimeSpan else TimeSpan.FromMilliseconds 15.0
                                     try
                                         let guard = Task.Delay(delay, pause.Token)
-                                        let! _ = Task.WhenAny(next :> Task, guard, members :> Task, ctx.WatchFailure :> Task, stopping.Task :> Task)
-                                        if next.IsCompleted || members.IsCompleted then
+                                        let! _ = Task.WhenAny(next :> Task, guard, members :> Task, queuedSignal :> Task, ctx.WatchFailure :> Task, stopping.Task :> Task)
+                                        if next.IsCompleted || members.IsCompleted || queuedSignal.IsCompleted then
                                             stalledCheckedAt <- None
                                     finally pause.Cancel()
                         | Ok _ -> ()
@@ -483,11 +581,319 @@ type Service(ctx: Ctx, observerOptions: ObserverOptions) =
               "wait_budget_seconds", Int 240L
               "waiting", Str "Keep the original request pending during model contention and snapshot publication. Do not resubmit or fall back to repository scraping while waiting." ]))
 
+    let resolveWaitTimeout (waitTimeout: TimeSpan option) =
+        match waitTimeout with
+        | None -> queueOptions.DefaultWaitTimeout
+        | Some timeout ->
+            if timeout <= TimeSpan.Zero then raise (QueryError "wait_timeout_ms must be positive")
+            min timeout queueOptions.MaxWaitTimeout
+
+    let awaitSignal (target: Task) (ct: CancellationToken) = task {
+        if isClosing () then return raise (EnglishError("retrieval_stopping", 503, false))
+        if watcherFailed () then return raise ctx.WatchFailure.Result
+        if target.IsCompleted then
+            do! target
+        else
+            use linked = CancellationTokenSource.CreateLinkedTokenSource(ct, waiterAbortCts.Token)
+            try
+                do! target.WaitAsync(linked.Token)
+            with
+            | :? OperationCanceledException when isClosing () ->
+                return raise (EnglishError("retrieval_stopping", 503, false))
+            | :? OperationCanceledException when watcherFailed () ->
+                return raise ctx.WatchFailure.Result
+        if isClosing () then return raise (EnglishError("retrieval_stopping", 503, false))
+        if watcherFailed () then return raise ctx.WatchFailure.Result
+    }
+
+    let markParkedLocked (waiter: Waiter) =
+        if not waiter.Removed && not waiter.Parked then
+            waiter.Parked <- true
+            parkedCount <- parkedCount + 1
+            Volatile.Write(&queuedCount, parkedCount)
+            notifyQueueChanged ()
+
+    let releaseQueueReservationLocked (reservation: QueueReservation) =
+        if reservation.Held then
+            reservation.Held <- false
+            reservedQueueSlots <- reservedQueueSlots - 1
+
+    let releaseQueueReservation (reservation: QueueReservation) =
+        lock queueGate (fun () -> releaseQueueReservationLocked reservation)
+
+    let insertByTicketLocked (lane: QueueLane) (waiter: Waiter) =
+        let mutable cursor = lane.WaitQueue.First
+        while not (isNull cursor) && cursor.Value.Ticket < waiter.Ticket do
+            cursor <- cursor.Next
+        if isNull cursor then lane.WaitQueue.AddLast waiter
+        else lane.WaitQueue.AddBefore(cursor, waiter)
+
+    let enqueueWaiterLocked (lane: QueueLane) (reservation: QueueReservation) (isRetry: bool) =
+        if isClosing () then raise (EnglishError("retrieval_stopping", 503, false))
+        let waiter = { Ticket = reservation.Ticket; BecomeHead = signal (); Demoted = signal (); Parked = false; Removed = false }
+        let previousHead = if lane.WaitQueue.Count > 0 then Some lane.WaitQueue.First.Value else None
+        let node = insertByTicketLocked lane waiter
+        let isHead = Object.ReferenceEquals(lane.WaitQueue.First, node)
+        if isHead then waiter.BecomeHead.TrySetResult() |> ignore
+        if isRetry || not isHead then markParkedLocked waiter
+        if isHead then
+            match previousHead with
+            | Some prev ->
+                markParkedLocked prev
+                prev.BecomeHead <- signal ()
+                let oldDemoted = prev.Demoted
+                prev.Demoted <- signal ()
+                oldDemoted.TrySetResult() |> ignore
+            | None -> ()
+        node
+
+    let acquireAndEnqueueWaiter (lane: QueueLane) =
+        lock queueGate (fun () ->
+            if isClosing () then raise (EnglishError("retrieval_stopping", 503, false))
+            if reservedQueueSlots >= queueOptions.MaxQueued then
+                raise (EnglishError("queue_full", 429, true))
+            reservedQueueSlots <- reservedQueueSlots + 1
+            nextTicket <- nextTicket + 1L
+            let reservation = { Ticket = nextTicket; Held = true }
+            let node = enqueueWaiterLocked lane reservation false
+            reservation, node)
+
+    let requeueRetryLocked (lane: QueueLane) (reservation: QueueReservation) =
+        lock queueGate (fun () ->
+            if lane.InFlightTickets.Remove reservation.Ticket then
+                notifyInFlightChangedLocked lane
+            if isClosing () then None
+            else Some(enqueueWaiterLocked lane reservation true))
+
+    let finishInFlightTicket (lane: QueueLane) (ticket: int64) =
+        lock queueGate (fun () ->
+            if lane.InFlightTickets.Remove ticket then
+                notifyInFlightChangedLocked lane)
+
+    let removeWaiter (lane: QueueLane) (node: LinkedListNode<Waiter>) (releaseReservationOnRemove: QueueReservation option) =
+        lock queueGate (fun () ->
+            let waiter = node.Value
+            waiter.BecomeHead.TrySetCanceled() |> ignore
+            waiter.Demoted.TrySetCanceled() |> ignore
+            if not waiter.Removed then
+                waiter.Removed <- true
+                let wasHead = Object.ReferenceEquals(lane.WaitQueue.First, node)
+                lane.WaitQueue.Remove node
+                releaseReservationOnRemove |> Option.iter releaseQueueReservationLocked
+                if waiter.Parked then
+                    parkedCount <- parkedCount - 1
+                    Volatile.Write(&queuedCount, parkedCount)
+                    notifyQueueChanged ()
+                if wasHead && lane.WaitQueue.Count > 0 then
+                    lane.WaitQueue.First.Value.BecomeHead.TrySetResult() |> ignore
+            else
+                releaseReservationOnRemove |> Option.iter releaseQueueReservationLocked)
+
+    let awaitWatchOrDeadline (watch: Task<unit>) (demoted: Task<unit>) (delay: TimeSpan option) (ct: CancellationToken) = task {
+        if isClosing () then return raise (EnglishError("retrieval_stopping", 503, false))
+        if watcherFailed () then return raise ctx.WatchFailure.Result
+        if watch.IsCompleted then
+            do! awaitSignal watch ct
+        elif demoted.IsCompleted then
+            ()
+        else
+            match delay with
+            | Some d when d <= TimeSpan.Zero -> ()
+            | _ ->
+                use linked = CancellationTokenSource.CreateLinkedTokenSource(ct, waiterAbortCts.Token)
+                use wakeCts = CancellationTokenSource.CreateLinkedTokenSource(linked.Token)
+                delay |> Option.iter (fun d -> wakeCts.CancelAfter d)
+                let w = watch.WaitAsync(wakeCts.Token)
+                let d = demoted.WaitAsync(wakeCts.Token)
+                try
+                    let! _ = Task.WhenAny(w, d)
+                    if isClosing () then return raise (EnglishError("retrieval_stopping", 503, false))
+                    if watcherFailed () then return raise ctx.WatchFailure.Result
+                    if ct.IsCancellationRequested then ct.ThrowIfCancellationRequested()
+                    if watch.IsCompleted then
+                        do! watch
+                finally
+                    wakeCts.Cancel()
+    }
+
+    let acquireFreshSlot (lane: QueueLane) (reservation: QueueReservation) (capacity: SemaphoreSlim) (activeNode: LinkedListNode<Waiter>) (isRetry: bool) (waitBudgetCt: CancellationToken) (callerCt: CancellationToken) : Task<J * string * bool> = task {
+        let mutable handedOffSuccess = false
+        try
+            try
+                if isClosing () then raise (EnglishError("retrieval_stopping", 503, false))
+                waitBudgetCt.ThrowIfCancellationRequested()
+                let waiter = activeNode.Value
+                let mutable result : (J * string * bool) option = None
+                while result.IsNone do
+                    if isClosing () then raise (EnglishError("retrieval_stopping", 503, false))
+                    waitBudgetCt.ThrowIfCancellationRequested()
+                    let turn =
+                        lock queueGate (fun () ->
+                            if Object.ReferenceEquals(lane.WaitQueue.First, activeNode) then
+                                if isRetry && hasOlderInFlightLocked lane reservation.Ticket then
+                                    Choice3Of3 lane.InFlightChanged.Task
+                                else
+                                    Choice1Of3 waiter.Demoted.Task
+                            else Choice2Of3 waiter.BecomeHead.Task)
+                    match turn with
+                    | Choice3Of3 waitInFlight ->
+                        do! awaitSignal waitInFlight waitBudgetCt
+                    | Choice2Of3 waitTurn ->
+                        do! awaitSignal waitTurn waitBudgetCt
+                    | Choice1Of3 demotedTask ->
+                        // Subscribe before reading the durable publication fence: a
+                        // publication during that read must not leave this caller asleep.
+                        let nextChanged = ctx.WatchReadiness()
+                        if nextChanged.IsCompleted then
+                            do! awaitSignal nextChanged waitBudgetCt
+                        let! after, published = readiness waitBudgetCt
+                        if isClosing () then raise (EnglishError("retrieval_stopping", 503, false))
+                        match published with
+                        | Some snapshot ->
+                            let mutable acquired = capacity.Wait(0)
+                            if not acquired then
+                                lock queueGate (fun () -> markParkedLocked waiter)
+                                do! capacity.WaitAsync(waitBudgetCt)
+                                acquired <- true
+                            try
+                                if isClosing () then raise (EnglishError("retrieval_stopping", 503, false))
+                                let handedOff =
+                                    lock queueGate (fun () ->
+                                        if isClosing () then raise (EnglishError("retrieval_stopping", 503, false))
+                                        if Object.ReferenceEquals(lane.WaitQueue.First, activeNode) then
+                                            let waited = waiter.Parked
+                                            if not waiter.Removed then
+                                                waiter.Removed <- true
+                                                waiter.Demoted.TrySetCanceled() |> ignore
+                                                lane.WaitQueue.Remove activeNode
+                                                if waiter.Parked then
+                                                    parkedCount <- parkedCount - 1
+                                                    Volatile.Write(&queuedCount, parkedCount)
+                                                    notifyQueueChanged ()
+                                            lane.InFlightTickets.Add reservation.Ticket |> ignore
+                                            if lane.WaitQueue.Count > 0 then
+                                                lane.WaitQueue.First.Value.BecomeHead.TrySetResult() |> ignore
+                                            Some waited
+                                        else
+                                            None)
+                                match handedOff with
+                                | Some waited ->
+                                    acquired <- false
+                                    handedOffSuccess <- true
+                                    result <- Some(after, snapshot, waited)
+                                | None -> ()
+                            finally
+                                if acquired then capacity.Release() |> ignore
+                        | None ->
+                            if not nextChanged.IsCompleted then
+                                lock queueGate (fun () -> markParkedLocked waiter)
+                                let delay = nextDeadline ()
+                                do! awaitWatchOrDeadline nextChanged demotedTask delay waitBudgetCt
+                return result.Value
+            finally
+                if not handedOffSuccess then
+                    removeWaiter lane activeNode (Some reservation)
+        with
+        | :? OperationCanceledException when isClosing () -> return raise (EnglishError("retrieval_stopping", 503, false))
+        | :? ObjectDisposedException when isClosing () -> return raise (EnglishError("retrieval_stopping", 503, false))
+        | :? OperationCanceledException when not callerCt.IsCancellationRequested ->
+            return raise (EnglishError("wait_timeout", 503, true))
+    }
+
+    let acquireOptOutInner (admCt: CancellationToken) : Task<string> = task {
+        lock queueGate (fun () ->
+            if isClosing () then raise (EnglishError("retrieval_stopping", 503, false))
+            if optOutWaitingCount >= queueOptions.MaxQueued then
+                raise (EnglishError("queue_full", 429, true))
+            optOutWaitingCount <- optOutWaitingCount + 1)
+        let mutable holdingIntake = true
+        let releaseIntake () =
+            if holdingIntake then
+                holdingIntake <- false
+                lock queueGate (fun () -> optOutWaitingCount <- optOutWaitingCount - 1)
+        let mutable acquired = false
+        let mutable handed = false
+        try
+            let! currentFreshness, published = readiness admCt
+            match published with
+            | None -> return raise (IndexNotCurrent currentFreshness)
+            | Some initialSnapshot ->
+                if isClosing () then raise (EnglishError("retrieval_stopping", 503, false))
+                if admission.Wait(0) then
+                    acquired <- true
+                    releaseIntake ()
+                    handed <- true
+                    return initialSnapshot
+                else
+                    do! admission.WaitAsync(admCt)
+                    acquired <- true
+                    releaseIntake ()
+                    if isClosing () then raise (EnglishError("retrieval_stopping", 503, false))
+                    let! recheckFreshness, recheckPublished = readiness admCt
+                    match recheckPublished with
+                    | Some s ->
+                        handed <- true
+                        return s
+                    | None -> return raise (IndexNotCurrent recheckFreshness)
+        finally
+            releaseIntake ()
+            if acquired && not handed then admission.Release() |> ignore
+    }
+
+    let acquireOptOutSnapshot (admCt: CancellationToken) (callerCt: CancellationToken) (isRetry: bool) : Task<string> = task {
+        try
+            return! acquireOptOutInner admCt
+        with
+        | :? OperationCanceledException when isClosing () ->
+            return raise (EnglishError("retrieval_stopping", 503, false))
+        | :? ObjectDisposedException when isClosing () ->
+            return raise (EnglishError("retrieval_stopping", 503, false))
+        | :? OperationCanceledException when not callerCt.IsCancellationRequested && isRetry ->
+            return raise (EnglishError("retrieval_wait_budget_exceeded", 504, false))
+        | :? OperationCanceledException when not callerCt.IsCancellationRequested ->
+            return raise (EnglishError("wait_timeout", 503, true))
+    }
+
+    let executePinnedCore (waitTimeout: TimeSpan option) (action: CancellationToken -> CancellationToken -> Task<J>) (cancellation: CancellationToken) : Task<J> = task {
+        let waitBudget = resolveWaitTimeout waitTimeout
+        enterRequest ()
+        try
+            use execCts = CancellationTokenSource.CreateLinkedTokenSource(cancellation, lifetime.Token)
+            let execCt = execCts.Token
+            use waitCts = CancellationTokenSource.CreateLinkedTokenSource(execCt)
+            waitCts.CancelAfter(waitBudget)
+            waitCts.Token.ThrowIfCancellationRequested()
+            let acquiredImmediately =
+                lock queueGate (fun () ->
+                    if isClosing () then raise (EnglishError("retrieval_stopping", 503, false))
+                    if pinnedWaitingCount = 0 && readConcurrency.Wait(0) then true
+                    elif pinnedWaitingCount >= queueOptions.MaxQueued then
+                        raise (EnglishError("queue_full", 429, true))
+                    else
+                        pinnedWaitingCount <- pinnedWaitingCount + 1
+                        false)
+            let mutable acquired = acquiredImmediately
+            try
+                if not acquiredImmediately then
+                    try
+                        do! readConcurrency.WaitAsync(waitCts.Token)
+                        acquired <- true
+                    finally
+                        lock queueGate (fun () -> pinnedWaitingCount <- pinnedWaitingCount - 1)
+                if isClosing () then raise (EnglishError("retrieval_stopping", 503, false))
+                return! action waitCts.Token execCt
+            finally
+                if acquired then readConcurrency.Release() |> ignore
+        finally leaveRequest ()
+    }
+
     let close = lazy (task {
         do! cancelLifetime.Value
         // Join admitted HTTP callers and observers before closing their demand host.
-        // Waiters outside admission are canceled by the same service lifetime.
+        let awaitRequests = lock queueGate (fun () -> if activeRequests = 0 then Task.CompletedTask else requestsDrained.Task)
+        do! awaitRequests
         for _ in 1..64 do do! admission.WaitAsync()
+        for _ in 1..queueOptions.MaxConcurrentReads do do! readConcurrency.WaitAsync()
         for _ in 1..observerOptions.Capacity do do! observers.WaitAsync()
         // The producer exits on the same lifetime; join it before the projection goes.
         match lock registryGate (fun () -> producer) with
@@ -497,73 +903,192 @@ type Service(ctx: Ctx, observerOptions: ObserverOptions) =
             let! closed = ClrInterop.toTask CancellationToken.None (AsyncMailbox.close handle)
             require closed |> ignore
             lock projectionGate (fun () -> (projection :> IDisposable).Dispose())
-        finally lifetime.Dispose()
+        finally
+            lifetime.Dispose()
+            waiterAbortCts.Dispose()
     })
 
     member _.Remit() : J = lock projectionGate (fun () -> projection.Run(fun () -> manifest.Value))
     member _.Snapshot() = AsyncMailbox.snapshot handle
     member _.Consumers = Volatile.Read(&consumers)
+    member _.QueuedRetrievals = Volatile.Read(&queuedCount)
+    member _.QueueOptions = queueOptions
 
-    member _.Ask(question: Question, cancellation: CancellationToken) = task {
+    member _.ExecuteReadAsync(waitTimeout: TimeSpan option, expectedSnapshot: string option, action: CancellationToken -> Task<J>, cancellation: CancellationToken) : Task<J> = task {
+        let waitBudget = resolveWaitTimeout waitTimeout
+        enterRequest ()
+        let mutable reservation : QueueReservation option = None
+        let mutable pendingNode : LinkedListNode<Waiter> option = None
+        try
+            try
+                use execCts = CancellationTokenSource.CreateLinkedTokenSource(cancellation, lifetime.Token)
+                let execCt = execCts.Token
+                use waitCts = CancellationTokenSource.CreateLinkedTokenSource(execCt)
+                waitCts.CancelAfter(waitBudget)
+                waitCts.Token.ThrowIfCancellationRequested()
+                let res, initialNode = acquireAndEnqueueWaiter readLane
+                reservation <- Some res
+                pendingNode <- Some initialNode
+                let mutable result : J option = None
+                let mutable isRetry = false
+                let mutable everWaited = false
+                while result.IsNone do
+                    let nodeArg =
+                        match pendingNode with
+                        | Some node -> pendingNode <- None; node
+                        | None -> raise (EnglishError("retrieval_stopping", 503, false))
+                    let! _, snapshot, waited = acquireFreshSlot readLane res readConcurrency nodeArg isRetry waitCts.Token cancellation
+                    try
+                        if isClosing () then raise (EnglishError("retrieval_stopping", 503, false))
+                        everWaited <- everWaited || waited || isRetry
+                        if everWaited && expectedSnapshot |> Option.exists (fun s -> s <> snapshot) then
+                            raise (PinnedSnapshotError("snapshot_changed", 409, true))
+                        try
+                            let! value = action execCt
+                            finishInFlightTicket readLane res.Ticket
+                            result <- Some value
+                        with
+                        | IndexNotCurrent _ ->
+                            isRetry <- true
+                            everWaited <- true
+                            match requeueRetryLocked readLane res with
+                            | Some node -> pendingNode <- Some node
+                            | None -> raise (EnglishError("retrieval_stopping", 503, false))
+                        | QueryError msg when expectedSnapshot = Some snapshot && msg.StartsWith("Snapshot changed", StringComparison.Ordinal) ->
+                            raise (PinnedSnapshotError("snapshot_changed", 409, true))
+                    finally
+                        readConcurrency.Release() |> ignore
+                return result.Value
+            with
+            | :? OperationCanceledException when isClosing () -> return raise (EnglishError("retrieval_stopping", 503, false))
+            | :? ObjectDisposedException when isClosing () -> return raise (EnglishError("retrieval_stopping", 503, false))
+            | :? OperationCanceledException when not cancellation.IsCancellationRequested ->
+                return raise (EnglishError("wait_timeout", 503, true))
+        finally
+            reservation |> Option.iter (fun res -> finishInFlightTicket readLane res.Ticket)
+            pendingNode |> Option.iter (fun n -> removeWaiter readLane n reservation)
+            reservation |> Option.iter releaseQueueReservation
+            leaveRequest ()
+    }
+
+    member this.ExecuteRead(waitTimeout: TimeSpan option, action: unit -> J, cancellation: CancellationToken) : Task<J> =
+        this.ExecuteReadAsync(waitTimeout, None, (fun _ -> Task.FromResult(action ())), cancellation)
+
+    member _.ExecutePinnedWithBudgetAsync(waitTimeout: TimeSpan option, action: CancellationToken -> CancellationToken -> Task<J>, cancellation: CancellationToken) : Task<J> = task {
+        try
+            return! executePinnedCore waitTimeout action cancellation
+        with
+        | PinnedSnapshotError("wait_timeout", 503, true) when not (isClosing ()) ->
+            return raise (EnglishError("wait_timeout", 503, true))
+        | :? OperationCanceledException when isClosing () -> return raise (EnglishError("retrieval_stopping", 503, false))
+        | :? ObjectDisposedException when isClosing () -> return raise (EnglishError("retrieval_stopping", 503, false))
+        | :? OperationCanceledException when not cancellation.IsCancellationRequested ->
+            return raise (EnglishError("wait_timeout", 503, true))
+    }
+
+    member this.ExecutePinnedAsync(waitTimeout: TimeSpan option, action: CancellationToken -> Task<J>, cancellation: CancellationToken) : Task<J> =
+        this.ExecutePinnedWithBudgetAsync(waitTimeout, (fun _ execCt -> action execCt), cancellation)
+
+    member this.ExecutePinned(action: unit -> J, cancellation: CancellationToken) : Task<J> =
+        this.ExecutePinnedWithBudgetAsync(None, (fun _ _ -> Task.FromResult(action ())), cancellation)
+
+    member this.Ask(question: Question, waitTimeout: TimeSpan option, cancellation: CancellationToken, ?waitForFresh: bool) = task {
         if isNull question.Text || question.Text.Trim().Length < 1 || question.Text.Trim().Length > 2000
            || question.Limit < 1L || question.Limit > 20L || question.MaxChars < 4L || question.MaxChars > 4000L then
             raise (QueryError "Invalid text retrieval request")
-        if isClosing () then raise (EnglishError("retrieval_stopping", 503, false))
+        let waitForFresh = defaultArg waitForFresh true
+        let waitBudget = resolveWaitTimeout waitTimeout
+        enterRequest ()
+        let mutable reservation : QueueReservation option = None
+        let mutable pendingNode : LinkedListNode<Waiter> option = None
         try
-            use budget = CancellationTokenSource.CreateLinkedTokenSource(cancellation, lifetime.Token)
-            budget.CancelAfter(TimeSpan.FromSeconds 240.0)
-            let ct = budget.Token
-            do! admission.WaitAsync ct
             try
-                if isClosing () then raise (EnglishError("retrieval_stopping", 503, false))
+                use budget = CancellationTokenSource.CreateLinkedTokenSource(cancellation, lifetime.Token)
+                budget.CancelAfter(max (TimeSpan.FromSeconds 240.0) waitBudget)
+                let ct = budget.Token
+                use waitCts = CancellationTokenSource.CreateLinkedTokenSource(ct)
+                waitCts.CancelAfter(waitBudget)
+                ct.ThrowIfCancellationRequested()
+                if waitForFresh then
+                    let res, initialNode = acquireAndEnqueueWaiter askLane
+                    reservation <- Some res
+                    pendingNode <- Some initialNode
                 let mutable answer = None
+                let mutable isRetry = false
+                let mutable hasBoundJob = false
                 while answer.IsNone do
                     ct.ThrowIfCancellationRequested()
-                    // Subscribe before reading the durable publication fence: a
-                    // publication during that read must not leave this caller asleep.
-                    let changed = ctx.WatchReadiness()
-                    if changed.IsCompleted then do! changed.WaitAsync ct
-                    let! _, snapshot = readiness ct
-                    match snapshot with
-                    | None -> do! changed.WaitAsync ct
-                    | Some snapshot ->
+                    let! snapshot =
+                        match reservation with
+                        | Some res ->
+                            let nodeArg =
+                                match pendingNode with
+                                | Some node -> pendingNode <- None; node
+                                | None -> raise (EnglishError("retrieval_stopping", 503, false))
+                            task {
+                                let! _, snap, _ = acquireFreshSlot askLane res admission nodeArg isRetry waitCts.Token cancellation
+                                return snap
+                            }
+                        | None ->
+                            acquireOptOutSnapshot (if hasBoundJob then ct else waitCts.Token) cancellation hasBoundJob
+                    try
+                        if isClosing () then raise (EnglishError("retrieval_stopping", 503, false))
                         match question.Snapshot with Some pinned when pinned <> snapshot -> raise (EnglishError("snapshot_changed", 409, true)) | _ -> ()
-                        do! gate.WaitAsync ct
+                        let bindCt = if waitForFresh || not hasBoundJob then waitCts.Token else ct
                         let mutable bound = None
                         let mutable capacity = Task.FromResult(())
                         try
-                            if isClosing () then raise (EnglishError("retrieval_stopping", 503, false))
-                            if allocated >= 128 && consumers = 0 then
-                                let! closed = ClrInterop.toTask CancellationToken.None (AsyncMailbox.close handle)
-                                require closed |> ignore
-                                jobs.Clear(); inputs.Clear(); outputs.Clear(); allocated <- 0
-                                handle <- create ()
-                            let key = question, snapshot
-                            if jobs.ContainsKey key || allocated < 128 then
-                                let h = handle
-                                let job =
-                                    match jobs.TryGetValue key with
-                                    | true, existing -> existing
-                                    | _ ->
-                                        let job = { Id = next (); Question = question; Snapshot = snapshot; Consumers = 0 }
-                                        inputs.[ValueToken job.Id] <- job
-                                        jobs.Add(key, job); allocated <- allocated + 1
-                                        job
-                                if job.Consumers = 0 && (AsyncMailbox.tryResult (WorkId job.Id) h).IsNone then
-                                    do! send h (Action.SetInputs [{ Input = InputId job.Id; Stamp = InputStamp 1UL; Value = ValueToken job.Id }])
-                                    do! send h (Action.ReserveScope(ScopeId job.Id, RevisionId 1UL))
-                                    do! send h (Action.ReplaceScope(ScopeId job.Id, RevisionId 1UL, [ScopeEntry.Define {
-                                        Work = WorkId job.Id; Stamp = DefinitionStamp 1UL
-                                        Reads = [{ Slot = ReadSlotId 1UL; Source = ReadSource.Input(InputId job.Id) }] }]))
-                                let demand = DemandId(next ())
-                                do! send h (Action.Demand(demand, WorkId job.Id))
-                                job.Consumers <- job.Consumers + 1; consumers <- consumers + 1
-                                bound <- Some(h, job, demand)
-                            else capacity <- epochReleased.Task
-                        finally gate.Release() |> ignore
+                            do! gate.WaitAsync bindCt
+                            try
+                                if isClosing () then raise (EnglishError("retrieval_stopping", 503, false))
+                                if allocated >= 128 && consumers = 0 then
+                                    let! closed = ClrInterop.toTask CancellationToken.None (AsyncMailbox.close handle)
+                                    require closed |> ignore
+                                    jobs.Clear(); inputs.Clear(); outputs.Clear(); allocated <- 0
+                                    handle <- create ()
+                                let key = question, snapshot
+                                if jobs.ContainsKey key || allocated < 128 then
+                                    let h = handle
+                                    let job =
+                                        match jobs.TryGetValue key with
+                                        | true, existing -> existing
+                                        | _ ->
+                                            let job = { Id = next (); Question = question; Snapshot = snapshot; Consumers = 0 }
+                                            inputs.[ValueToken job.Id] <- job
+                                            jobs.Add(key, job); allocated <- allocated + 1
+                                            job
+                                    if job.Consumers = 0 && (AsyncMailbox.tryResult (WorkId job.Id) h).IsNone then
+                                        do! send h (Action.SetInputs [{ Input = InputId job.Id; Stamp = InputStamp 1UL; Value = ValueToken job.Id }])
+                                        do! send h (Action.ReserveScope(ScopeId job.Id, RevisionId 1UL))
+                                        do! send h (Action.ReplaceScope(ScopeId job.Id, RevisionId 1UL, [ScopeEntry.Define {
+                                            Work = WorkId job.Id; Stamp = DefinitionStamp 1UL
+                                            Reads = [{ Slot = ReadSlotId 1UL; Source = ReadSource.Input(InputId job.Id) }] }]))
+                                    let demand = DemandId(next ())
+                                    do! send h (Action.Demand(demand, WorkId job.Id))
+                                    job.Consumers <- job.Consumers + 1; consumers <- consumers + 1
+                                    bound <- Some(h, job, demand)
+                                else capacity <- epochReleased.Task
+                            finally gate.Release() |> ignore
+                            if bound.IsNone then
+                                do! capacity.WaitAsync bindCt
+                        with
+                        | :? OperationCanceledException when isClosing () ->
+                            raise (EnglishError("retrieval_stopping", 503, false))
+                        | :? ObjectDisposedException when isClosing () ->
+                            raise (EnglishError("retrieval_stopping", 503, false))
+                        | :? OperationCanceledException when not cancellation.IsCancellationRequested && (waitForFresh || not hasBoundJob) ->
+                            raise (EnglishError("wait_timeout", 503, true))
                         match bound with
-                        | None -> do! capacity.WaitAsync ct
+                        | None ->
+                            isRetry <- true
+                            match reservation with
+                            | Some res ->
+                                match requeueRetryLocked askLane res with
+                                | Some node -> pendingNode <- Some node
+                                | None -> raise (EnglishError("retrieval_stopping", 503, false))
+                            | None -> ()
                         | Some(h, job, demand) ->
+                            hasBoundJob <- true
                             // Async disposal releases this demand even when its observer
                             // is canceled. The host still owns physical attempt cleanup.
                             use release = { new IAsyncDisposable with
@@ -590,18 +1115,38 @@ type Service(ctx: Ctx, observerOptions: ObserverOptions) =
                             // Eligibility is necessary, but IndexState alone authorizes
                             // current publication. A raced update rebinds this same caller.
                             if published = Some snapshot then
+                                reservation |> Option.iter (fun res -> finishInFlightTicket askLane res.Ticket)
                                 answer <- Some(match result.Value with
                                                | Ok(Obj fields) -> Obj ((fields |> List.filter (fun (k, _) -> k <> "freshness")) @ [ "freshness", after ])
                                                | Ok value -> value
                                                | Error error -> raise error)
+                            elif not waitForFresh && published.IsNone then
+                                raise (IndexNotCurrent after)
+                            else
+                                isRetry <- true
+                                match reservation with
+                                | Some res ->
+                                    match requeueRetryLocked askLane res with
+                                    | Some node -> pendingNode <- Some node
+                                    | None -> raise (EnglishError("retrieval_stopping", 503, false))
+                                | None -> ()
+                    finally
+                        admission.Release() |> ignore
                 return answer.Value
-            finally admission.Release() |> ignore
-        with
-        | :? OperationCanceledException when isClosing () -> return raise (EnglishError("retrieval_stopping", 503, false))
-        | :? ObjectDisposedException when isClosing () -> return raise (EnglishError("retrieval_stopping", 503, false))
-        | :? OperationCanceledException when not cancellation.IsCancellationRequested ->
-            return raise (EnglishError("retrieval_wait_budget_exceeded", 504, false))
+            with
+            | :? OperationCanceledException when isClosing () -> return raise (EnglishError("retrieval_stopping", 503, false))
+            | :? ObjectDisposedException when isClosing () -> return raise (EnglishError("retrieval_stopping", 503, false))
+            | :? OperationCanceledException when not cancellation.IsCancellationRequested ->
+                return raise (EnglishError("retrieval_wait_budget_exceeded", 504, false))
+        finally
+            reservation |> Option.iter (fun res -> finishInFlightTicket askLane res.Ticket)
+            pendingNode |> Option.iter (fun n -> removeWaiter askLane n reservation)
+            reservation |> Option.iter releaseQueueReservation
+            leaveRequest ()
     }
+
+    member this.Ask(question: Question, cancellation: CancellationToken, ?waitForFresh: bool) =
+        this.Ask(question, None, cancellation, ?waitForFresh = waitForFresh)
 
     member _.Observers = Volatile.Read(&observing)
     member _.ObserverCapacity = observerOptions.Capacity
@@ -632,4 +1177,4 @@ type Service(ctx: Ctx, observerOptions: ObserverOptions) =
         beginStop ()
         close.Value
 
-    new(ctx: Ctx) = Service(ctx, defaultObserverOptions)
+    new(ctx: Ctx) = Service(ctx, defaultObserverOptions, defaultQueueOptions)

@@ -26,8 +26,15 @@ open Fanion.Tests.IndexStateTests
 open Fanion.Tests.EnglishTests
 
 // The test transport carries real HTTP bytes to Kestrel without binding a socket.
-type private WireStream(reader: Stream, writer: Stream) =
+type private WireStream(reader: Stream, writer: Stream, abort: unit -> unit) =
     inherit Stream()
+    let gate = obj ()
+    let closeCts = new CancellationTokenSource()
+    let mutable closed = false
+    let mutable activeReads = 0
+    let mutable activeWrites = 0
+    let completeReader () = try reader.Dispose() with _ -> ()
+    let completeWriter () = try writer.Dispose() with _ -> ()
     override _.CanRead = true
     override _.CanWrite = true
     override _.CanSeek = false
@@ -38,14 +45,89 @@ type private WireStream(reader: Stream, writer: Stream) =
     override _.Flush() = writer.Flush()
     override _.FlushAsync cancellation = writer.FlushAsync cancellation
     override _.Read(buffer, offset, count) = reader.Read(buffer, offset, count)
-    override _.ReadAsync(buffer: Memory<byte>, cancellation) = reader.ReadAsync(buffer, cancellation)
+    override _.ReadAsync(buffer: Memory<byte>, cancellation: CancellationToken) : ValueTask<int> =
+        let linked =
+            lock gate (fun () ->
+                if closed then None
+                else
+                    activeReads <- activeReads + 1
+                    Some(CancellationTokenSource.CreateLinkedTokenSource(cancellation, closeCts.Token)))
+        match linked with
+        | None -> ValueTask<int>(Task.FromException<int>(IOException("Connection closed")))
+        | Some cts ->
+            ValueTask<int>(task {
+                try
+                    try return! reader.ReadAsync(buffer, cts.Token)
+                    with :? OperationCanceledException when closed && not cancellation.IsCancellationRequested ->
+                        return raise (IOException("Connection aborted"))
+                finally
+                    cts.Dispose()
+                    let finish =
+                        lock gate (fun () ->
+                            activeReads <- activeReads - 1
+                            closed && activeReads = 0)
+                    if finish then completeReader ()
+            })
     override _.Write(buffer, offset, count) = writer.Write(buffer, offset, count)
-    override _.WriteAsync(buffer: ReadOnlyMemory<byte>, cancellation) = writer.WriteAsync(buffer, cancellation)
+    override _.WriteAsync(buffer: ReadOnlyMemory<byte>, cancellation: CancellationToken) : ValueTask =
+        let linked =
+            lock gate (fun () ->
+                if closed then None
+                else
+                    activeWrites <- activeWrites + 1
+                    Some(CancellationTokenSource.CreateLinkedTokenSource(cancellation, closeCts.Token)))
+        match linked with
+        | None -> ValueTask(Task.FromException(IOException("Connection closed")))
+        | Some cts ->
+            ValueTask(task {
+                try do! writer.WriteAsync(buffer, cts.Token)
+                finally
+                    cts.Dispose()
+                    let finish =
+                        lock gate (fun () ->
+                            activeWrites <- activeWrites - 1
+                            closed && activeWrites = 0)
+                    if finish then completeWriter ()
+            })
     override _.Dispose(disposing) =
         if disposing then
-            writer.Dispose()
-            reader.Dispose()
+            let shouldClose, noReads, noWrites =
+                lock gate (fun () ->
+                    if closed then false, false, false
+                    else
+                        closed <- true
+                        try closeCts.Cancel() with _ -> ()
+                        true, activeReads = 0, activeWrites = 0)
+            if shouldClose then
+                if noWrites then completeWriter ()
+                if noReads then completeReader ()
+                abort ()
         base.Dispose disposing
+
+type private WireConnection(id: string, transport: IDuplexPipe, application: IDuplexPipe, inbound: PipeWriter) =
+    inherit DefaultConnectionContext(id, transport, application)
+    let gate = obj ()
+    let closedCts = new CancellationTokenSource()
+    let mutable disposed = false
+    member private _.TriggerAbort() =
+        let active =
+            lock gate (fun () ->
+                if disposed then false
+                else
+                    try closedCts.Cancel() with _ -> ()
+                    true)
+        if active then try inbound.Complete() with _ -> ()
+    override _.ConnectionClosed
+        with get () = closedCts.Token
+        and set _ = ()
+    override this.Abort() = this.TriggerAbort()
+    override this.Abort(_: ConnectionAbortedException) = this.TriggerAbort()
+    override _.DisposeAsync() =
+        lock gate (fun () ->
+            if not disposed then
+                disposed <- true
+                closedCts.Dispose())
+        base.DisposeAsync()
 
 type WireTransport() =
     let connections = Channel.CreateUnbounded<ConnectionContext>()
@@ -57,9 +139,10 @@ type WireTransport() =
         let inbound, outbound = Pipe(), Pipe()
         let transport = duplex inbound.Reader outbound.Writer
         let application = duplex outbound.Reader inbound.Writer
-        let connection = new DefaultConnectionContext(Guid.NewGuid().ToString("N"), transport, application)
+        let connection = new WireConnection(Guid.NewGuid().ToString("N"), transport, application, inbound.Writer)
+        connection.Features.Set<Microsoft.AspNetCore.Connections.Features.IConnectionLifetimeFeature>(connection)
         if not (connections.Writer.TryWrite connection) then invalidOp "Kestrel test transport has stopped"
-        new WireStream(outbound.Reader.AsStream(), inbound.Writer.AsStream())
+        new WireStream(outbound.Reader.AsStream(), inbound.Writer.AsStream(), fun () -> connection.Abort())
     member this.Configure(builder: WebApplicationBuilder) =
         builder.Services.RemoveAll<IConnectionListenerFactory>().AddSingleton<IConnectionListenerFactory>(this) |> ignore
     interface IConnectionListenerFactory with
@@ -79,13 +162,15 @@ let private read (response: HttpResponseMessage) =
     int response.StatusCode, response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
 
 // The gateway runs its production routes and Kestrel protocol over the test transport.
-type Server(corpus: Corpus, model: ModelClient option, secret: byte[] option, ?changes: IndexState.Changes) =
+type Server(corpus: Corpus, model: ModelClient option, secret: byte[] option, ?changes: IndexState.Changes, ?queueOptions: Requests.QueueOptions, ?observerOptions: Requests.ObserverOptions, ?config: string) =
     let wire = WireTransport()
     let cancellation = new CancellationTokenSource()
     let token = String('t', 48)
     let options : Fanion.Serve.Options =
-        { Root = corpus.Root; Config = corpus.Config; Engine = corpus.Engine; PromptFile = promptFile; Token = token; WebhookSecret = secret
-          Host = "127.0.0.1"; Port = 0; Model = model; Observers = Requests.defaultObserverOptions }
+        { Root = corpus.Root; Config = defaultArg config corpus.Config; Engine = corpus.Engine; PromptFile = promptFile; Token = token; WebhookSecret = secret
+          Host = "127.0.0.1"; Port = 0; Model = model
+          Observers = defaultArg observerOptions Requests.defaultObserverOptions
+          Queue = defaultArg queueOptions Requests.defaultQueueOptions }
     let createClient timeout =
         let handler = new SocketsHttpHandler(UseProxy = false)
         handler.ConnectCallback <- fun _ _ -> ValueTask<Stream>(wire.Connect())
@@ -274,11 +359,17 @@ let ``signed forgejo push hints require a valid hmac and are deduplicated`` () =
         Assert.Equal(202, status)
         Assert.False(bool' issue "accepted")
         let status, untracked = event (withRef "refs/heads/untracked") "untracked" []
-        Assert.Equal(202, status)
+        Assert.Equal(422, status)
         Assert.False(bool' untracked "accepted")
+        Assert.Equal("untracked_repository_or_ref", text (field untracked "error"))
         let status, wrongCase = event (withRef "refs/heads/MAIN") "case-sensitive-branch" []  // Git refs are case-sensitive
-        Assert.Equal(202, status)
+        Assert.Equal(422, status)
         Assert.False(bool' wrongCase "accepted")
+        Assert.Equal("untracked_repository_or_ref", text (field wrongCase "error"))
+        let status, unmanagedRepo = event (withName (Str "FidelityFramework/unmanaged")) "unmanaged-repo" []
+        Assert.Equal(422, status)
+        Assert.False(bool' unmanagedRepo "accepted")
+        Assert.Equal("untracked_repository_or_ref", text (field unmanagedRepo "error"))
         let broken = Encoding.UTF8.GetBytes "{\"broken"
         let status, malformed = server.Post("v1/index/events/forgejo", broken, [ "X-Forgejo-Signature", sign broken; "X-Forgejo-Event", "push"; "X-Forgejo-Delivery", "broken" ])
         Assert.Equal(400, status)
@@ -299,7 +390,7 @@ let ``signed forgejo push hints require a valid hmac and are deduplicated`` () =
         Assert.True(bool' alias "duplicate")
         Assert.Equal<string list>([ "test" ], corpus.Coordinator.State.PendingPlan().ObservationRequired)
         // The hint fences the gateway until the source is observed and rebuilt.
-        let status, pending = server.Call(Obj [ "action", Str "schema" ])
+        let status, pending = server.Call(Obj [ "action", Str "schema"; "wait_for_fresh", Bool false ])
         Assert.Equal(503, status)
         Assert.Equal("index_not_current", text (field pending "error"))
         Assert.Contains("test", strings (field pending "freshness") "observation_required")
@@ -307,7 +398,7 @@ let ``signed forgejo push hints require a valid hmac and are deduplicated`` () =
         Assert.Equal("index_not_current", text (field (snd (server.Health())) "status"))
         Assert.Empty(corpus.Observe())
         Assert.Equal(Some newRevision, corpus.Coordinator.State.PendingPlan().DesiredRevisions.["test"])
-        Assert.Equal(503, fst (server.Call(Obj [ "action", Str "schema" ])))
+        Assert.Equal(503, fst (server.Call(Obj [ "action", Str "schema"; "wait_for_fresh", Bool false ])))
         Assert.True(bool' (corpus.RunOnce()) "published")
         let status, current = server.Call(Obj [ "action", Str "schema" ])
         Assert.Equal(200, status)
@@ -433,13 +524,11 @@ let ``snapshot work waits before admission and an in-flight update rebinds witho
 
 [<Fact>]
 let ``publication wakes all waiting callers without canceling a shared watch`` () =
-    let changed, waiting = completed<unit> (), completed<unit> ()
-    let mutable fresh, reads, calls = false, 0, 0
+    let changed = completed<unit> ()
+    let mutable fresh, calls = false, 0
     let ctx : Requests.Ctx =
         { Sources = []; Observe = (fun _ _ -> failwith "Ask tests never observe"); WatchFailure = watchHealthy; WhileWatchHealthy = (fun action -> action ()); WatchReadiness = fun () -> changed.Task
-          Readiness = fun _ ->
-              if Interlocked.Increment(&reads) = 4 then waiting.SetResult()
-              System.Threading.Tasks.Task.FromResult(readyAt "one" fresh)
+          Readiness = fun _ -> System.Threading.Tasks.Task.FromResult(readyAt "one" fresh)
           Evaluate = fun _ _ _ ->
               Interlocked.Increment(&calls) |> ignore
               System.Threading.Tasks.Task.FromResult(Str "published") }
@@ -448,7 +537,7 @@ let ``publication wakes all waiting callers without canceling a shared watch`` (
         let question = queuedQuestion "four waiting readers"
         let abandoned = service.Ask(question, canceled.Token)
         let peers = [ for _ in 1..3 -> service.Ask(question, CancellationToken.None) ]
-        do! bounded waiting.Task
+        do! until (fun () -> service.QueuedRetrievals = 4)
         Assert.Equal(0, calls)
         canceled.Cancel()
         let! _ = Assert.ThrowsAnyAsync<OperationCanceledException>(fun () -> abandoned :> System.Threading.Tasks.Task)

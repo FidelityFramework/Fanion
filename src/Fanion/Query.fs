@@ -21,6 +21,7 @@ exception QueryError of string
 exception QueryBudgetError of string
 exception IndexNotCurrent of J
 exception GraphUnavailable of string
+exception PinnedSnapshotError of code: string * status: int * retryable: bool
 
 let duckdbThreads = 8
 let private hex = Regex(@"\A[0-9a-f]{64}\z", RegexOptions.Compiled)
@@ -369,6 +370,7 @@ type ManagedStore(root: string, config: string, engine: Load.Engine, promptFile:
     member _.State = state
     member _.ConfiguredSources = sources
     member _.Identity = identity
+    member _.ManifestIdentityMatches() = state.VerifyManifestIdentity identity
 
     member private _.ConfigurationMatches(generation: Generation, current: Store) =
         let expected : J = Obj [ for s in sources -> s.Id, Obj [ "repo", Str s.Repo; "ref", Str s.Ref; "revision", (match Map.tryFind s.Id generation.Revisions |> Option.flatten with Some r -> Str r | None -> Null) ] ]
@@ -388,6 +390,7 @@ type ManagedStore(root: string, config: string, engine: Load.Engine, promptFile:
             | None -> verified = Some generation.SnapshotId)
 
     member private this.CallLocked(action: Store -> J, snapshotId: string option) : J =
+        if not (state.VerifyManifestIdentity identity) then raise (PinnedSnapshotError("corpus_configuration_changed", 409, true))
         let generation = match state.ActiveGeneration() with Some g -> g | None -> raise (IndexNotCurrent(Obj [ "fresh", Bool false; "reasons", Arr [ Str "no_published_generation" ] ]))
         let snapshot = generation.SnapshotId
         let freshness = state.Freshness(snapshot, maxAge)
@@ -395,8 +398,9 @@ type ManagedStore(root: string, config: string, engine: Load.Engine, promptFile:
         if not (isFresh freshness) then raise (IndexNotCurrent freshness)
         (match snapshotId with Some s when s <> snapshot -> raise (QueryError "Snapshot changed; discover the schema again") | _ -> ())
         let current = this.Bind generation
-        if not (this.ConfigurationMatches(generation, current)) then raise (IndexNotCurrent(ManagedStore.Unconfigured freshness))
+        if not (this.ConfigurationMatches(generation, current)) then raise (PinnedSnapshotError("corpus_configuration_changed", 409, true))
         let result = action current
+        if not (state.VerifyManifestIdentity identity) then raise (PinnedSnapshotError("corpus_configuration_changed", 409, true))
         let after = state.Freshness(snapshot, maxAge)
         if not (isFresh after) then raise (IndexNotCurrent after)
         match result with Obj pairs -> Obj (pairs @ [ "freshness", after ]) | other -> other
@@ -419,10 +423,58 @@ type ManagedStore(root: string, config: string, engine: Load.Engine, promptFile:
         | Obj pairs -> Obj ((pairs |> List.filter (fun (k, _) -> k <> "fresh" && k <> "reasons")) @ [ "fresh", Bool false; "reasons", Arr [ Str "corpus_configuration_changed" ] ])
         | other -> other
 
+    member _.VerifyManifestIdentity() : unit =
+        if not (state.VerifyManifestIdentity identity) then raise (PinnedSnapshotError("corpus_configuration_changed", 409, true))
+
     member this.Call(action: Store -> J, ?snapshotId: string) : J =
+        this.VerifyManifestIdentity()
         if not (gate.Wait(250)) then raise (QueryBudgetError "Graph is busy")
         try this.CallLocked(action, snapshotId)
         finally gate.Release() |> ignore
+
+    member this.CallAsync(action: Store -> J, ?snapshotId: string, ?cancellation: CancellationToken) : Task<J> = task {
+        this.VerifyManifestIdentity()
+        let ct = defaultArg cancellation CancellationToken.None
+        do! gate.WaitAsync ct
+        try return this.CallLocked(action, snapshotId)
+        finally gate.Release() |> ignore
+    }
+
+    member private this.CallPinnedLocked(action: Store -> J, snapshotId: string) : J =
+        if not (state.VerifyManifestIdentity identity) then raise (PinnedSnapshotError("corpus_configuration_changed", 409, true))
+        let generation = match state.ActiveGeneration() with Some g -> g | None -> raise (PinnedSnapshotError("snapshot_changed", 409, true))
+        if generation.SnapshotId <> snapshotId then raise (PinnedSnapshotError("snapshot_changed", 409, true))
+        let current = this.Bind generation
+        if not (this.ConfigurationMatches(generation, current)) then raise (PinnedSnapshotError("corpus_configuration_changed", 409, true))
+        let result = action current
+        if not (state.VerifyManifestIdentity identity) then raise (PinnedSnapshotError("corpus_configuration_changed", 409, true))
+        let freshness =
+            match state.Freshness(snapshotId, maxAge) with
+            | Obj pairs -> Obj [ for k, v in pairs -> k, (if k = "mode" then Str "pinned" else v) ]
+            | other -> other
+        match result with Obj pairs -> Obj (pairs @ [ "freshness", freshness ]) | other -> other
+
+    member this.CallPinned(action: Store -> J, snapshotId: string) : J =
+        if isNull snapshotId || not (hex.IsMatch snapshotId) then raise (QueryError "snapshot_id must be a lowercase 64-hex digest")
+        this.VerifyManifestIdentity()
+        if not (gate.Wait(3000)) then raise (QueryBudgetError "Graph is busy")
+        try this.CallPinnedLocked(action, snapshotId)
+        finally gate.Release() |> ignore
+
+    member this.CallPinnedAsync(action: Store -> J, snapshotId: string, ?cancellation: CancellationToken, ?gateCancellation: CancellationToken) : Task<J> = task {
+        if isNull snapshotId || not (hex.IsMatch snapshotId) then raise (QueryError "snapshot_id must be a lowercase 64-hex digest")
+        this.VerifyManifestIdentity()
+        let execCt = defaultArg cancellation CancellationToken.None
+        let gateCt = defaultArg gateCancellation execCt
+        try
+            do! gate.WaitAsync gateCt
+        with :? OperationCanceledException when not execCt.IsCancellationRequested ->
+            raise (PinnedSnapshotError("wait_timeout", 503, true))
+        try
+            execCt.ThrowIfCancellationRequested()
+            return this.CallPinnedLocked(action, snapshotId)
+        finally gate.Release() |> ignore
+    }
 
     member this.Readiness() : J =
         try (match this.Call(fun s -> s.Schema()) with Obj pairs -> (pairs |> List.pick (fun (k, v) -> if k = "freshness" then Some v else None)) | other -> other)
@@ -431,6 +483,7 @@ type ManagedStore(root: string, config: string, engine: Load.Engine, promptFile:
     /// Contention is a semaphore wait, not an unpublished generation. Waiting on
     /// SQLite changes for a busy graph would miss its eventual semaphore release.
     member this.ReadinessAsync(cancellation: CancellationToken) : Task<J> = task {
+        this.VerifyManifestIdentity()
         do! gate.WaitAsync cancellation
         try
             try
@@ -442,14 +495,18 @@ type ManagedStore(root: string, config: string, engine: Load.Engine, promptFile:
     }
 
     member this.Schema() = this.Call(fun s -> s.Schema())
+    member this.SchemaAsync(cancellation: CancellationToken) = this.CallAsync((fun s -> s.Schema()), cancellation = cancellation)
 
     // Read SQLite outside the DuckDB gate so observer sampling never starves queries;
     // validate and bind DuckDB only for the active fresh generation.
     member this.ObserveAsync(after: int64 option, cancellation: CancellationToken) : Task<ObservationBatch> = task {
         cancellation.ThrowIfCancellationRequested()
         let batch = state.ObserveSince(maxAge, after)
+        let manifestOk = state.VerifyManifestIdentity identity
         let! current, verified, rejected = task {
             match batch.Current.Active, field batch.Current.Freshness "fresh" with
+            | Some generation, _ when not manifestOk ->
+                return { batch.Current with Freshness = ManagedStore.Unconfigured batch.Current.Freshness }, None, Some generation.SnapshotId
             | Some generation, Some(Bool true) ->
                 do! gate.WaitAsync cancellation
                 try
@@ -469,7 +526,7 @@ type ManagedStore(root: string, config: string, engine: Load.Engine, promptFile:
         let checkHistorical (observation: Observation) =
             match observation.Active, field observation.Freshness "fresh" with
             | Some generation, Some(Bool true)
-                when rejected = Some generation.SnapshotId || not (this.RecordedConfigurationMatches(generation, verified)) ->
+                when not manifestOk || rejected = Some generation.SnapshotId || not (this.RecordedConfigurationMatches(generation, verified)) ->
                 { observation with Freshness = ManagedStore.Unconfigured observation.Freshness }
             | _ -> observation
         let history =
@@ -481,6 +538,21 @@ type ManagedStore(root: string, config: string, engine: Load.Engine, promptFile:
     member this.Find(query, snapshotId, repo, limit, layer) = this.Call((fun s -> s.Find(query, snapshotId, repo, limit, layer)), snapshotId)
     member this.Pgq(query, parameters, snapshotId, limit, offset) = this.Call((fun s -> s.Pgq(query, parameters, snapshotId, limit, offset)), snapshotId)
     member this.Sources(ids, snapshotId, maxChars, ?lineRange: int * int) = this.Call((fun s -> s.Sources(ids, snapshotId, maxChars, ?lineRange = lineRange)), snapshotId)
+    member this.FindAsync(query, snapshotId, repo, limit, layer, cancellation: CancellationToken) =
+        this.CallAsync((fun s -> s.Find(query, snapshotId, repo, limit, layer)), snapshotId = snapshotId, cancellation = cancellation)
+    member this.PgqAsync(query, parameters, snapshotId, limit, offset, cancellation: CancellationToken) =
+        this.CallAsync((fun s -> s.Pgq(query, parameters, snapshotId, limit, offset)), snapshotId = snapshotId, cancellation = cancellation)
+    member this.SourcesAsync(ids, snapshotId, maxChars, cancellation: CancellationToken, ?lineRange: int * int) =
+        this.CallAsync((fun s -> s.Sources(ids, snapshotId, maxChars, ?lineRange = lineRange)), snapshotId = snapshotId, cancellation = cancellation)
+    member this.FindPinned(query, snapshotId, repo, limit, layer) = this.CallPinned((fun s -> s.Find(query, snapshotId, repo, limit, layer)), snapshotId)
+    member this.PgqPinned(query, parameters, snapshotId, limit, offset) = this.CallPinned((fun s -> s.Pgq(query, parameters, snapshotId, limit, offset)), snapshotId)
+    member this.SourcesPinned(ids, snapshotId, maxChars, ?lineRange: int * int) = this.CallPinned((fun s -> s.Sources(ids, snapshotId, maxChars, ?lineRange = lineRange)), snapshotId)
+    member this.FindPinnedAsync(query, snapshotId, repo, limit, layer, cancellation: CancellationToken, ?gateCancellation: CancellationToken) =
+        this.CallPinnedAsync((fun s -> s.Find(query, snapshotId, repo, limit, layer)), snapshotId, cancellation = cancellation, ?gateCancellation = gateCancellation)
+    member this.PgqPinnedAsync(query, parameters, snapshotId, limit, offset, cancellation: CancellationToken, ?gateCancellation: CancellationToken) =
+        this.CallPinnedAsync((fun s -> s.Pgq(query, parameters, snapshotId, limit, offset)), snapshotId, cancellation = cancellation, ?gateCancellation = gateCancellation)
+    member this.SourcesPinnedAsync(ids, snapshotId, maxChars, cancellation: CancellationToken, ?lineRange: int * int, ?gateCancellation: CancellationToken) =
+        this.CallPinnedAsync((fun s -> s.Sources(ids, snapshotId, maxChars, ?lineRange = lineRange)), snapshotId, cancellation = cancellation, ?gateCancellation = gateCancellation)
     member _.CloseAsync() = task {
         do! gate.WaitAsync()
         try

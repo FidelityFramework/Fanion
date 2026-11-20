@@ -24,12 +24,17 @@ open Fanion.English
 
 type Options =
     { Root: string; Config: string; Engine: Load.Engine; PromptFile: string; Token: string; WebhookSecret: byte[] option
-      Host: string; Port: int; Model: ModelClient option; Observers: Requests.ObserverOptions }
+      Host: string; Port: int; Model: ModelClient option; Observers: Requests.ObserverOptions; Queue: Requests.QueueOptions }
 
+let private crossingOptional = [ "freshness_mode"; "wait_for_fresh"; "wait_timeout_ms" ]
 let private fields : (string * (string list * string list)) list =
-    [ "remit", ([], []); "schema", ([], []); "find", ([ "query"; "snapshot_id" ], [ "repo"; "limit"; "corpus_layer" ])
-      "pgq", ([ "query"; "parameters"; "snapshot_id" ], [ "limit"; "offset" ]); "sources", ([ "ids"; "snapshot_id" ], [ "max_chars" ])
-      "prompt", ([ "text" ], [ "snapshot_id" ]); "ask", ([ "text" ], [ "snapshot_id"; "limit"; "max_chars"; "include_context"; "include_query"; "include_results" ]) ]
+    [ "remit", ([], [])
+      "schema", ([], crossingOptional)
+      "find", ([ "query"; "snapshot_id" ], [ "repo"; "limit"; "corpus_layer" ] @ crossingOptional)
+      "pgq", ([ "query"; "parameters"; "snapshot_id" ], [ "limit"; "offset" ] @ crossingOptional)
+      "sources", ([ "ids"; "snapshot_id" ], [ "max_chars" ] @ crossingOptional)
+      "prompt", ([ "text" ], [ "snapshot_id" ] @ crossingOptional)
+      "ask", ([ "text" ], [ "snapshot_id"; "limit"; "max_chars"; "include_context"; "include_query"; "include_results" ] @ crossingOptional) ]
 
 let private fixedTimeEquals (a: string) (b: string) = CryptographicOperations.FixedTimeEquals(ReadOnlySpan(Encoding.UTF8.GetBytes a), ReadOnlySpan(Encoding.UTF8.GetBytes b))
 
@@ -81,11 +86,61 @@ let private dispatch (ctx: Ctx) (payload: JsonValue) (cancellation: System.Threa
     let required, optional = match fields |> List.tryFind (fun (a, _) -> a = action) with Some(_, f) -> f | None -> raise (QueryError "action must be schema, find, pgq, sources, prompt or ask")
     let present = [ for name, _ in JsonInput.fields payload do if name <> "action" then yield name ] |> set
     if not (Set.isSubset (set required) present) || not (Set.isSubset present (set (required @ optional))) then raise (QueryError "Request fields do not match the action contract")
+    let freshnessMode =
+        match typed payload "freshness_mode" with
+        | None -> "latest"
+        | Some(JsonValue.String "latest") -> "latest"
+        | Some(JsonValue.String "pinned") -> "pinned"
+        | Some _ -> raise (QueryError "freshness_mode must be latest or pinned")
+    let waitForFresh =
+        match typed payload "wait_for_fresh" with
+        | None -> (freshnessMode <> "pinned")
+        | Some(JsonValue.Bool value) -> value
+        | Some _ -> raise (QueryError "wait_for_fresh must be a boolean")
+    let waitTimeout =
+        match typed payload "wait_timeout_ms" with
+        | None -> None
+        | Some value ->
+            match Json.tryAsInt64 value with
+            | Some ms when ms > 0L ->
+                let clampedMs = min (float ms) ctx.Requests.QueueOptions.MaxWaitTimeout.TotalMilliseconds
+                Some(TimeSpan.FromMilliseconds clampedMs)
+            | _ -> raise (QueryError "wait_timeout_ms must be a positive integer")
+    if freshnessMode = "pinned" then
+        if typed payload "wait_for_fresh" = Some(JsonValue.Bool true) then
+            raise (QueryError "wait_for_fresh cannot be combined with freshness_mode pinned")
+        if action = "schema" || action = "ask" then
+            raise (QueryError "freshness_mode pinned is only supported for find, pgq, sources and prompt")
+    let runLatest (expectedSnapshot: string option) (readAsync: CancellationToken -> Task<J>) (readSync: unit -> J) =
+        if waitForFresh then ctx.Requests.ExecuteReadAsync(waitTimeout, expectedSnapshot, readAsync, cancellation)
+        else Task.FromResult(readSync ())
+    let runRead (expectedSnapshot: string option) (latestAsync: CancellationToken -> Task<J>) (latestSync: unit -> J) (pinnedAsync: CancellationToken -> CancellationToken -> Task<J>) =
+        if freshnessMode = "pinned" then ctx.Requests.ExecutePinnedWithBudgetAsync(waitTimeout, pinnedAsync, cancellation)
+        else runLatest expectedSnapshot latestAsync latestSync
+    if action = "schema" || action = "find" || action = "pgq" || action = "sources" || action = "prompt" || action = "ask" then
+        store.VerifyManifestIdentity()
     match action with
     | "remit" -> return ctx.Requests.Remit()
     | "schema" ->
-        return (match store.Schema() with Obj pairs -> Obj (pairs @ [ "english", english.Contract() ]) | other -> other)
-    | "find" -> return store.Find(requireString payload "query", requireString payload "snapshot_id", optionalString payload "repo", requireInt payload "limit" 10L, optionalString payload "corpus_layer")
+        let withEnglish result =
+            match result with Obj pairs -> Obj (pairs @ [ "english", english.Contract() ]) | other -> other
+        return! runLatest
+            None
+            (fun ct -> task { let! s = store.SchemaAsync ct in return withEnglish s })
+            (fun () -> withEnglish (store.Schema()))
+    | "find" ->
+        let query = requireString payload "query"
+        let snapshotId = requireString payload "snapshot_id"
+        let repo = optionalString payload "repo"
+        let limit = requireInt payload "limit" 10L
+        let layer = optionalString payload "corpus_layer"
+        if isNull query || query.Trim().Length < 1 || query.Trim().Length > 256 || limit < 1L || limit > 50L then
+            raise (QueryError "find needs a 1–256 character query and limit 1–50")
+        return! runRead
+            (Some snapshotId)
+            (fun ct -> store.FindAsync(query, snapshotId, repo, limit, layer, ct))
+            (fun () -> store.Find(query, snapshotId, repo, limit, layer))
+            (fun gateCt execCt -> store.FindPinnedAsync(query, snapshotId, repo, limit, layer, execCt, gateCancellation = gateCt))
     | "pgq" ->
         let parameters =
             match typed payload "parameters" with
@@ -95,17 +150,42 @@ let private dispatch (ctx: Ctx) (payload: JsonValue) (cancellation: System.Threa
                   EdgeKind = pairs |> List.tryPick (fun (k, v) -> if k = "edge_kind" then Some v else None)
                   Extra = (pairs |> List.exists (fun (k, _) -> k <> "seed" && k <> "edge_kind")) || not (pairs |> List.exists (fun (k, _) -> k = "seed")) }
             | _ -> raise (QueryError "Query parameters do not match the placeholders")
-        return store.Pgq(requireString payload "query", parameters, requireString payload "snapshot_id", requireInt payload "limit" 25L, requireInt payload "offset" 0L)
+        let query = requireString payload "query"
+        let snapshotId = requireString payload "snapshot_id"
+        let limit = requireInt payload "limit" 25L
+        let offset = requireInt payload "offset" 0L
+        compilePgq query parameters limit offset None |> ignore
+        return! runRead
+            (Some snapshotId)
+            (fun ct -> store.PgqAsync(query, parameters, snapshotId, limit, offset, ct))
+            (fun () -> store.Pgq(query, parameters, snapshotId, limit, offset))
+            (fun gateCt execCt -> store.PgqPinnedAsync(query, parameters, snapshotId, limit, offset, execCt, gateCancellation = gateCt))
     | "sources" ->
         let ids = match typed payload "ids" with Some(JsonValue.Array values) -> [ for value in values -> (match value with JsonValue.String id -> id | _ -> null) ] | _ -> raise (QueryError "ids")
-        return store.Sources(ids, requireString payload "snapshot_id", requireInt payload "max_chars" 8000L)
-    | "prompt" -> return english.Prompt(requireString payload "text", optionalString payload "snapshot_id")
+        let snapshotId = requireString payload "snapshot_id"
+        let maxChars = requireInt payload "max_chars" 8000L
+        if ids.Length < 1 || ids.Length > 10 || ids |> List.exists isNull || maxChars < 1L || maxChars > 16000L then
+            raise (QueryError "sources requires 1–10 evidence IDs and max_chars 1–16000")
+        return! runRead
+            (Some snapshotId)
+            (fun ct -> store.SourcesAsync(ids, snapshotId, maxChars, ct))
+            (fun () -> store.Sources(ids, snapshotId, maxChars))
+            (fun gateCt execCt -> store.SourcesPinnedAsync(ids, snapshotId, maxChars, execCt, gateCancellation = gateCt))
+    | "prompt" ->
+        let text = requireString payload "text"
+        let snapshotId = optionalString payload "snapshot_id"
+        if isNull text || text.Trim().Length < 1 || text.Trim().Length > 2000 then
+            raise (QueryError "text must contain 1-2000 characters")
+        match freshnessMode, snapshotId with
+        | "pinned", None -> return raise (QueryError "freshness_mode pinned requires an explicit snapshot_id")
+        | "pinned", Some s -> return! ctx.Requests.ExecutePinnedWithBudgetAsync(waitTimeout, (fun gateCt execCt -> english.PromptPinnedAsync(text, s, execCt, gateCancellation = gateCt)), cancellation)
+        | _ -> return! runLatest snapshotId (fun ct -> english.PromptAsync(text, snapshotId, ct)) (fun () -> english.Prompt(text, snapshotId))
     | "ask" ->
         let question : Requests.Question =
             { Text = requireString payload "text"; Snapshot = optionalString payload "snapshot_id"
               Limit = requireInt payload "limit" 8L; MaxChars = requireInt payload "max_chars" 2400L
               IncludeContext = optionalBool payload "include_context" false; IncludeQuery = optionalBool payload "include_query" true; IncludeResults = optionalBool payload "include_results" true }
-        return! ctx.Requests.Ask(question, cancellation)
+        return! ctx.Requests.Ask(question, waitTimeout, cancellation, waitForFresh = waitForFresh)
     | _ -> return raise (QueryError "action")
 }
 
@@ -153,7 +233,7 @@ let runWithChangesAsync (createChanges: string -> IndexState.Changes) (configure
         { Readiness = store.ReadinessAsync; WatchReadiness = changes.Watch; Observe = (fun cursor ct -> store.ObserveAsync(cursor, ct)); Sources = store.ConfiguredSources
           WatchFailure = changes.Failure; WhileWatchHealthy = changes.WhileHealthy
           Evaluate = fun q snapshot ct -> english.AskAsync(q.Text, Some snapshot, q.Limit, q.MaxChars, q.IncludeContext, q.IncludeQuery, q.IncludeResults, ct) }
-    let requests = new Requests.Service(requestCtx, options.Observers)
+    let requests = new Requests.Service(requestCtx, options.Observers, options.Queue, nextDeadline = store.State.NextCrossingDelay)
     let builder = WebApplication.CreateBuilder()
     builder.WebHost.UseUrls(sprintf "http://%s:%d" options.Host options.Port) |> ignore
     builder.Logging.ClearProviders() |> ignore
@@ -190,14 +270,22 @@ let runWithChangesAsync (createChanges: string -> IndexState.Changes) (configure
                                     match name, reference with
                                     | JsonValue.String name, JsonValue.String reference -> name, reference
                                     | _ -> raise (JsonInputError "strings")
-                                let matches = store.ConfiguredSources |> List.filter (fun s -> String.Equals(s.Repo, name, StringComparison.OrdinalIgnoreCase) && s.Ref = reference)
-                                match matches with
-                                | [] -> do! json context 202 (Obj [ "accepted", Bool false; "reason", Str "Untracked repository or ref" ])
-                                | source :: _ ->
-                                    let delivery = let d = header context.Request "x-forgejo-delivery" in if d <> "" then d else header context.Request "x-gitea-delivery"
-                                    let result = store.State.EventHint(delivery, source.Id, "push")
-                                    do! json context 202 result
+                                if not (store.ManifestIdentityMatches()) then
+                                    do! json context 409 (Obj [ "accepted", Bool false; "error", Str "corpus_configuration_changed"; "reason", Str IndexState.manifestIdentityErrorMessage ])
+                                else
+                                    let isTrunk = reference = "refs/heads/main" || reference = "refs/heads/master"
+                                    let matches =
+                                        if not isTrunk then []
+                                        else store.ConfiguredSources |> List.filter (fun s -> String.Equals(s.Repo, name, StringComparison.OrdinalIgnoreCase) && s.Ref = reference)
+                                    match matches with
+                                    | [] -> do! json context 422 (Obj [ "accepted", Bool false; "error", Str "untracked_repository_or_ref"; "reason", Str "Untracked repository or ref" ])
+                                    | source :: _ ->
+                                        let delivery = let d = header context.Request "x-forgejo-delivery" in if d <> "" then d else header context.Request "x-gitea-delivery"
+                                        let result = store.State.EventHint(delivery, source.Id, "push", expectedManifestIdentity = store.Identity)
+                                        do! json context 202 result
                             with
+                            | IndexState.StateError msg when msg = IndexState.manifestIdentityErrorMessage ->
+                                do! json context 409 (Obj [ "accepted", Bool false; "error", Str "corpus_configuration_changed"; "reason", Str msg ])
                             | JsonInputError _ | :? KeyNotFoundException | :? InvalidOperationException | IndexState.StateError _ ->
                                 do! json context 400 (Obj [ "error", Str "Malformed push event" ])
         } :> Task
@@ -235,7 +323,8 @@ let runWithChangesAsync (createChanges: string -> IndexState.Changes) (configure
                             context.Response.ContentType <- "application/json"
                             do! context.Response.Body.WriteAsync(encoded, 0, encoded.Length)
                     with
-                    | EnglishError(code, status, retryable) ->
+                    | EnglishError(code, status, retryable)
+                    | PinnedSnapshotError(code, status, retryable) ->
                         let recourse = "Report retrieval unavailable for this request. Queueing, indexing and inference failures do not permit repository scraping for covered material; no query was fabricated."
                         do! json context status (Obj [ ("error", Str code); ("retryable", Bool retryable); ("recourse", Str recourse) ])
                     | :? OperationCanceledException when context.RequestAborted.IsCancellationRequested -> ()
@@ -253,7 +342,136 @@ let runWithChangesAsync (createChanges: string -> IndexState.Changes) (configure
                         do! json context 503 (Obj [ "error", Str "Graph generation unavailable" ])
         } :> Task
 
-    let routes = [ GET [ route "/health" (health ctx); route "/v1/retrieval/observe" (observe options.Token requests logger) ]; POST [ route "/v1/retrieval" (retrieval ctx); route "/v1/index/events/forgejo" (index ctx) ] ]
+    let configuredById = store.ConfiguredSources |> List.map (fun s -> s.Id, s) |> Map.ofList
+
+    let crossingHold (ctx: Ctx) (context: HttpContext) : Task =
+        let options, store = ctx.Options, ctx.Store
+        task {
+            let auth = header context.Request "authorization"
+            if not (fixedTimeEquals auth ("Bearer " + options.Token)) then
+                do! json context 401 (Obj [ "error", Str "Unauthorized" ])
+            else
+                match! readBody context.Request 16384 with
+                | None -> do! json context 413 (Obj [ "error", Str "Request exceeds 16 KiB" ])
+                | Some body ->
+                    try
+                        let document = JsonInput.parseBytes body
+                        let pairs = JsonInput.fields document
+                        let present = pairs |> List.map fst |> set
+                        if not (Set.isSubset (set [ "fence_id"; "sources" ]) present)
+                           || not (Set.isSubset present (set [ "fence_id"; "sources"; "refs"; "ttl_seconds"; "reason" ])) then
+                            do! json context 400 (Obj [ "error", Str "Invalid crossing hold fields" ])
+                        else
+                            let fenceId =
+                                match Json.prop "fence_id" document with
+                                | Some(JsonValue.String s) -> s
+                                | _ -> raise (QueryError "fence_id must be a string")
+                            IndexState.validateIdentifier fenceId "crossing fence_id"
+                            let sources =
+                                match Json.prop "sources" document with
+                                | Some(JsonValue.Array items) when not items.IsEmpty ->
+                                    [ for item in items -> match item with JsonValue.String s -> s | _ -> raise (QueryError "sources must be an array of strings") ]
+                                | _ -> raise (QueryError "sources must be a non-empty array of strings")
+                            if sources.Length <> (sources |> List.distinct).Length then
+                                raise (QueryError "sources must not contain duplicates")
+                            if not (store.ManifestIdentityMatches()) then
+                                do! json context 409 (Obj [ "error", Str "corpus_configuration_changed"; "retryable", Bool false ])
+                            else
+                            match sources |> List.tryFind (fun s -> not (configuredById.ContainsKey s)) with
+                            | Some unmanaged ->
+                                do! json context 422 (Obj [ "error", Str "unmanaged_source"; "source", Str unmanaged ])
+                            | None ->
+                                let requested = set sources
+                                let mutable refError : (int * J) option = None
+                                match Json.prop "refs" document with
+                                | None -> ()
+                                | Some(JsonValue.Object refPairs) ->
+                                    for (sourceId, refValue) in refPairs do
+                                        if refError.IsNone then
+                                            let reference =
+                                                match refValue with
+                                                | JsonValue.String r -> r
+                                                | _ -> raise (QueryError "refs entries must map source IDs to strings")
+                                            match Map.tryFind sourceId configuredById with
+                                            | None ->
+                                                refError <- Some(422, Obj [ "error", Str "unmanaged_source"; "source", Str sourceId ])
+                                            | Some configured ->
+                                                if not (requested.Contains sourceId) then
+                                                    raise (QueryError "refs entries must match requested sources")
+                                                let isTrunk = reference = "refs/heads/main" || reference = "refs/heads/master"
+                                                if not isTrunk || reference <> configured.Ref then
+                                                    refError <- Some(422, Obj [ "error", Str "invalid_crossing_ref"; "source", Str sourceId; "ref", Str reference ])
+                                | Some _ -> raise (QueryError "refs must be an object")
+                                match refError with
+                                | Some(status, errPayload) -> do! json context status errPayload
+                                | None ->
+                                    let ttlSeconds =
+                                        match Json.prop "ttl_seconds" document with
+                                        | None -> IndexState.defaultFenceTtlSeconds
+                                        | Some value ->
+                                            let ttl = try JsonInput.number value with JsonInputError _ -> raise (QueryError "ttl_seconds must be a finite positive number")
+                                            if Double.IsNaN ttl || Double.IsInfinity ttl || ttl <= 0.0 || ttl > IndexState.maxFenceTtlSeconds then
+                                                raise (QueryError "ttl_seconds must be in (0, 300]")
+                                            ttl
+                                    let reason =
+                                        match Json.prop "reason" document with
+                                        | None -> "multi_repo_crossing"
+                                        | Some(JsonValue.String r) when not (String.IsNullOrWhiteSpace r) && r.Length <= 512 -> r
+                                        | Some _ -> raise (QueryError "reason must be a 1–512 character string")
+                                    let receipt = store.State.HoldCrossing(fenceId, sources, ttlSeconds, reason, expectedManifestIdentity = store.Identity)
+                                    do! json context 200 receipt
+                    with
+                    | IndexState.StateError msg when msg = IndexState.manifestIdentityErrorMessage ->
+                        do! json context 409 (Obj [ "error", Str "corpus_configuration_changed"; "retryable", Bool false ])
+                    | JsonInputError msg | QueryError msg | IndexState.StateError msg ->
+                        do! json context 400 (Obj [ "error", Str msg ])
+        } :> Task
+
+    let crossingRelease (ctx: Ctx) (context: HttpContext) : Task =
+        let options, store = ctx.Options, ctx.Store
+        task {
+            let auth = header context.Request "authorization"
+            if not (fixedTimeEquals auth ("Bearer " + options.Token)) then
+                do! json context 401 (Obj [ "error", Str "Unauthorized" ])
+            else
+                match! readBody context.Request 16384 with
+                | None -> do! json context 413 (Obj [ "error", Str "Request exceeds 16 KiB" ])
+                | Some body ->
+                    try
+                        let document = JsonInput.parseBytes body
+                        let pairs = JsonInput.fields document
+                        let present = pairs |> List.map fst |> set
+                        if not (Set.contains "fence_id" present) || not (Set.isSubset present (set [ "fence_id"; "reason" ])) then
+                            do! json context 400 (Obj [ "error", Str "Invalid crossing release fields" ])
+                        else
+                            let fenceId =
+                                match Json.prop "fence_id" document with
+                                | Some(JsonValue.String s) -> s
+                                | _ -> raise (QueryError "fence_id must be a string")
+                            IndexState.validateIdentifier fenceId "crossing fence_id"
+                            let reason =
+                                match Json.prop "reason" document with
+                                | None -> None
+                                | Some(JsonValue.String r) when not (String.IsNullOrWhiteSpace r) && r.Length <= 512 -> Some r
+                                | Some _ -> raise (QueryError "reason must be a 1–512 character string")
+                            try
+                                let receipt = store.State.ReleaseCrossing(fenceId, ?reason = reason, expectedManifestIdentity = store.Identity)
+                                do! json context 200 receipt
+                            with IndexState.StateError "Unknown crossing fence" ->
+                                do! json context 404 (Obj [ "error", Str "unknown_fence"; "fence_id", Str fenceId ])
+                    with
+                    | IndexState.StateError msg when msg = IndexState.manifestIdentityErrorMessage ->
+                        do! json context 409 (Obj [ "error", Str "corpus_configuration_changed"; "retryable", Bool false ])
+                    | JsonInputError msg | QueryError msg | IndexState.StateError msg ->
+                        do! json context 400 (Obj [ "error", Str msg ])
+        } :> Task
+
+    let routes =
+        [ GET [ route "/health" (health ctx); route "/v1/retrieval/observe" (observe options.Token requests logger) ]
+          POST [ route "/v1/retrieval" (retrieval ctx)
+                 route "/v1/index/events/forgejo" (index ctx)
+                 route "/v1/crossing/hold" (crossingHold ctx)
+                 route "/v1/crossing/release" (crossingRelease ctx) ] ]
     app.UseRouting().UseOxpecker(routes).Run(Default.notFoundHandler)
     use stopping = app.Lifetime.ApplicationStopping.Register(Action requests.BeginStop)
     let running = app.RunAsync(cancellation)

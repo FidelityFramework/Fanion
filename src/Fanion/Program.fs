@@ -291,7 +291,7 @@ let main argv =
                 let model = English.settingsFromEnvironment () |> Option.map (fun s -> English.ModelClient(s))
                 Serve.run { Root = args.Required "--root"; Config = args.Required "--config"; Engine = engine; PromptFile = args.Required "--prompt-file"
                             Token = token; WebhookSecret = secret; Host = args.Text("--host", "0.0.0.0"); Port = args.Int("--port", 8080); Model = model
-                            Observers = Requests.defaultObserverOptions }
+                            Observers = Requests.defaultObserverOptions; Queue = Requests.defaultQueueOptions }
             | "index" when positional.Length = 0 ->
                 let lockPath name fallback = args.Text(name, Path.Combine(Path.GetDirectoryName(Environment.ProcessPath), fallback))
                 let duckpgqLock, libduckdbLock = lockPath "--duckpgq-lock" "duckpgq-lock.json", lockPath "--libduckdb-lock" "libduckdb-lock.json"

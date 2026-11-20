@@ -43,7 +43,7 @@ type Source =
 
 let private idPattern = Regex(@"\A[a-z][a-z0-9_\-]{0,47}\z", RegexOptions.Compiled)
 let private repoPattern = Regex(@"\AFidelityFramework/[A-Za-z0-9_.\-]{1,80}\z", RegexOptions.Compiled)
-let private refPattern = Regex(@"\Arefs/heads/[A-Za-z0-9][A-Za-z0-9_./\-]{0,100}\z", RegexOptions.Compiled)
+let private refPattern = Regex(@"\Arefs/heads/(?:main|master)\z", RegexOptions.Compiled)
 let private revisionPattern = Regex(@"\A[0-9a-f]{40}\z", RegexOptions.Compiled)
 
 /// config_sources: validated, ordered as configured.
@@ -134,11 +134,20 @@ type Coordinator(options: Options, stop: CancellationToken, ?maxObservationAge: 
         State(Path.Combine(root, "index-state.sqlite"), [ for s in sources -> s.Id, s.DependsOn ], leaseSeconds = options.LeaseSeconds,
               ?settleSeconds = options.SettleSeconds, ?maxSettleSeconds = options.MaxSettleSeconds, ?maxObservationAge = maxObservationAge)
     do
+        let rebound = state.RebindManifestIdentity(identity, [ for s in sources -> s.Id ], "Corpus manifest identity changed")
+        let running = state.RunningBuildTokens()
+        let generationsDir = Path.Combine(root, "generations")
+        for file in Directory.GetFiles(generationsDir, "*.building.duckdb*") do
+            let name = Path.GetFileName file
+            let idx = name.IndexOf(".building.duckdb", StringComparison.Ordinal)
+            if idx > 0 && not (running.Contains(name.Substring(0, idx))) then
+                try File.Delete file with _ -> ()
         let marker = Path.Combine(root, "extractor-fingerprint.json")
         let previous = if File.Exists marker then Some(File.ReadAllText marker) else None
         let expected = toText canonicalStyle (Obj [ "sha256", Str fingerprint ]) + "\n"
         if previous <> Some expected then
-            state.InvalidateSources([ for s in sources -> s.Id ], "Extractor or corpus configuration changed") |> ignore
+            if not rebound then
+                state.InvalidateSources([ for s in sources -> s.Id ], "Extractor or corpus configuration changed") |> ignore
             atomicJson marker (Obj [ "sha256", Str fingerprint ])
     let observationLock = obj ()
     let checkpoint () = if stop.IsCancellationRequested then raise (PipelineStopped "Indexer stopping; no further generation will be published")
@@ -152,6 +161,14 @@ type Coordinator(options: Options, stop: CancellationToken, ?maxObservationAge: 
     member _.Identity = identity
     member _.Fingerprint = fingerprint
     member _.Sources = sources
+
+    member _.ReclaimOnStartup() : int =
+        let reclaimed = state.ReclaimOrphanedBuilds("indexer_restarted")
+        let generationsDir = Path.Combine(root, "generations")
+        if Directory.Exists generationsDir then
+            for file in Directory.GetFiles(generationsDir, "*.building.duckdb*") do
+                try File.Delete file with _ -> ()
+        reclaimed
 
     /// Authoritative head of the tracked ref, None when the ref is absent.
     member _.RemoteHead(source: Source) : string option =
@@ -237,11 +254,20 @@ type Coordinator(options: Options, stop: CancellationToken, ?maxObservationAge: 
             while reader.Read() do ()
         | _ -> ()
 
-    /// One build pass; `force` skips the settle window (operator --once builds).
-    member this.RunOnce(force: bool) : J =
+    // One build pass; `force` skips the settle window (operator --once builds), never an active crossing fence.
+    member this.RunOnce(force: bool, ?onStaged: unit -> unit) : J =
         checkpoint ()
+        let crossingStatus (crossing: CrossingHold) =
+            Obj [ "status", Str "crossing_held"
+                  "active_fences", Arr [ for f in crossing.ActiveFences -> Str f ]
+                  "expected_sources", Arr [ for s in crossing.ExpectedSources -> Str s ]
+                  "pending_sources", Arr [ for s in crossing.PendingSources -> Str s ]
+                  "held_until", Float crossing.HeldUntil
+                  "reasons", Arr [ for r in crossing.Reasons -> Str r ] ]
         let plan = state.PendingPlan()
         if not plan.ObservationRequired.IsEmpty then Obj [ "status", Str "observation_required" ]
+        elif plan.Crossing.IsSome && plan.Crossing.Value.HeldUntil > state.Now() then
+            crossingStatus plan.Crossing.Value
         elif plan.Targets.IsEmpty then Obj [ "status", Str "idle" ]
         else
         let remaining = match plan.SettleUntil with Some until when not force && plan.BaseGeneration.IsSome -> until - state.Now() | _ -> 0.0
@@ -256,7 +282,15 @@ type Coordinator(options: Options, stop: CancellationToken, ?maxObservationAge: 
             let now = clock.Elapsed.TotalSeconds
             timeline.Add(name, boundary, now)
             boundary <- now
-        let token = state.StartBuild plan
+        let startedToken =
+            try Some(state.StartBuild plan)
+            with StateError "Crossing fence is held; build cannot start until crossing releases" -> None
+        match startedToken with
+        | None ->
+            match state.PendingPlan().Crossing with
+            | Some crossing -> crossingStatus crossing
+            | None -> Obj [ "status", Str "idle" ]
+        | Some token ->
         let reused, rebuilt = ResizeArray<string>(), ResizeArray<string>()
         let temporary = Path.Combine(root, "generations", token + ".building.duckdb")
         try
@@ -286,6 +320,7 @@ type Coordinator(options: Options, stop: CancellationToken, ?maxObservationAge: 
                     Obj [ ("repo", Str byId.[sourceId].Repo); ("ref", Str byId.[sourceId].Ref); ("revision", (match revision with Some r -> Str r | None -> Null)) ]
                 let tracked = Obj [ for kv in plan.DesiredRevisions -> (kv.Key, trackedEntry kv.Key kv.Value) ]
                 let report = Generation.generation options.Engine options.Budgets (List.ofSeq components) identity tracked temporary
+                onStaged |> Option.iter (fun hook -> hook ())
                 mark "generation"
                 checkpoint ()
                 let target = Path.Combine(root, "generations", report.SnapshotId + ".duckdb")
@@ -408,6 +443,7 @@ let run (coordinator: Coordinator) (changes: Changes) (stop: CancellationToken) 
                     | Obj ["errors", Arr []] -> failedPlan <- None
                     | _ -> print result; failedPlan <- Some(state.PendingPlan().PlanId)
                 elif not plan.Targets.IsEmpty && failedPlan <> Some plan.PlanId
+                     && plan.Crossing.IsNone
                      && (plan.BaseGeneration.IsNone || plan.SettleUntil |> Option.forall (fun until -> until <= now)) then
                     try
                         let! result = execute (fun () -> coordinator.RunOnce false)
@@ -420,9 +456,12 @@ let run (coordinator: Coordinator) (changes: Changes) (stop: CancellationToken) 
                         failedPlan <- Some(state.PendingPlan().PlanId)
                 else
                     let deadline =
-                        if not plan.Targets.IsEmpty && failedPlan <> Some plan.PlanId then
-                            min reconcileAt (defaultArg plan.SettleUntil reconcileAt)
-                        else reconcileAt
+                        match plan.Crossing with
+                        | Some crossing -> min reconcileAt crossing.EarliestHeldUntil
+                        | None ->
+                            if not plan.Targets.IsEmpty && failedPlan <> Some plan.PlanId then
+                                min reconcileAt (defaultArg plan.SettleUntil reconcileAt)
+                            else reconcileAt
                     use timer = CancellationTokenSource.CreateLinkedTokenSource stop
                     let delay = Task.Delay(TimeSpan.FromSeconds(max 0.001 (deadline - state.Now())), timer.Token)
                     let! wake = Task.WhenAny(changed :> Task, delay)
@@ -445,6 +484,7 @@ let serve (options: Options) (once: bool) : int =
     use _term = PosixSignalRegistration.Create(PosixSignal.SIGTERM, fun context -> context.Cancel <- true; stop.Cancel())
     use _int = PosixSignalRegistration.Create(PosixSignal.SIGINT, fun context -> context.Cancel <- true; stop.Cancel())
     let coordinator = Coordinator(options, stop.Token)
+    coordinator.ReclaimOnStartup() |> ignore
     let print (value: J) = Console.Out.WriteLine(toText canonicalStyle value); Console.Out.Flush()
     try
         if once then

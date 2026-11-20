@@ -303,14 +303,42 @@ type EnglishService(store: ManagedStore, model: ModelClient option) =
             Obj (prepared @ (match grammar with Some g -> [ "grammar", Str g; "grammar_sha256", Str (sha256Text g) ] | None -> [])
                  @ [ "request_options", options; "request_sha256", Str requestSha ])
 
-    member this.Prompt(text: string, snapshotId: string option) : J =
-        if isNull text || text.Trim().Length < 1 || text.Trim().Length > 2000 then raise (QueryError "text must contain 1-2000 characters")
-        (match snapshotId with Some s when isNull s || not (hex.IsMatch s) -> raise (QueryError "Invalid snapshot_id") | _ -> ())
-        let schema = this.SchemaFor(snapshotId, None)
+    member private this.BuildPrompt(text: string, schema: J) : J =
         let prepared = this.Messages("seed_discovery", text, schema, None)
         Obj ([ "snapshot_id", (match field schema "snapshot_id" with Some v -> v | None -> Null); "english", this.Contract()
                "query_prompt", (match field schema "query_prompt" with Some v -> v | None -> Null); "context", Arr [ prepared ] ]
              @ (match field schema "freshness" with Some f -> [ "freshness", f ] | None -> []))
+
+    member this.Prompt(text: string, snapshotId: string option) : J =
+        if isNull text || text.Trim().Length < 1 || text.Trim().Length > 2000 then raise (QueryError "text must contain 1-2000 characters")
+        (match snapshotId with Some s when isNull s || not (hex.IsMatch s) -> raise (QueryError "Invalid snapshot_id") | _ -> ())
+        let schema = this.SchemaFor(snapshotId, None)
+        this.BuildPrompt(text, schema)
+
+    member this.PromptAsync(text: string, snapshotId: string option, cancellation: CancellationToken) : System.Threading.Tasks.Task<J> = task {
+        if isNull text || text.Trim().Length < 1 || text.Trim().Length > 2000 then raise (QueryError "text must contain 1-2000 characters")
+        match snapshotId with
+        | Some s when isNull s || not (hex.IsMatch s) -> raise (QueryError "Invalid snapshot_id")
+        | _ -> ()
+        let! schema = store.SchemaAsync cancellation
+        match snapshotId with
+        | Some s when Some(Str s) <> field schema "snapshot_id" -> raise (EnglishError("snapshot_changed", 409, true))
+        | _ -> ()
+        return this.BuildPrompt(text, schema)
+    }
+
+    member this.PromptPinned(text: string, snapshotId: string) : J =
+        if isNull text || text.Trim().Length < 1 || text.Trim().Length > 2000 then raise (QueryError "text must contain 1-2000 characters")
+        if isNull snapshotId || not (hex.IsMatch snapshotId) then raise (QueryError "Invalid snapshot_id")
+        let schema = store.CallPinned((fun s -> s.Schema()), snapshotId)
+        this.BuildPrompt(text, schema)
+
+    member this.PromptPinnedAsync(text: string, snapshotId: string, cancellation: CancellationToken, ?gateCancellation: CancellationToken) : System.Threading.Tasks.Task<J> = task {
+        if isNull text || text.Trim().Length < 1 || text.Trim().Length > 2000 then raise (QueryError "text must contain 1-2000 characters")
+        if isNull snapshotId || not (hex.IsMatch snapshotId) then raise (QueryError "Invalid snapshot_id")
+        let! schema = store.CallPinnedAsync((fun s -> s.Schema()), snapshotId, cancellation = cancellation, ?gateCancellation = gateCancellation)
+        return this.BuildPrompt(text, schema)
+    }
 
     member this.AskAsync(text: string, snapshotId: string option, limit: int64, maxChars: int64, includeContext: bool, includeQuery: bool, includeResults: bool, cancellation: CancellationToken) : System.Threading.Tasks.Task<J> = task {
         if limit < 1L || limit > 20L || maxChars < 4L || maxChars > 4000L then raise (QueryError "Invalid English response budgets or flags")

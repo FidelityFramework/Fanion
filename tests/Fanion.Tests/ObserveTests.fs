@@ -51,7 +51,7 @@ let private notFreshJ (generation: int64) snapshot reasons pending stale =
           "stale_sources", Arr (stale |> List.map Str); "pending_sources", Arr (pending |> List.map Str)
           "checked_at", Float 100.0; "max_observation_age", Float 90.0 ]
 let private sampleOf freshness active changedAt deadline : IndexState.Observation =
-    { Freshness = freshness; Active = active; ChangedAt = changedAt; Deadline = deadline; CheckedAt = 100.0 }
+    { Freshness = freshness; Active = active; ChangedAt = changedAt; Deadline = deadline; CheckedAt = 100.0; Crossing = None }
 let private batch current : IndexState.ObservationBatch =
     { Sequence = 0L; History = IndexState.Transitions []; Current = current; SampledAt = Stopwatch.GetTimestamp() }
 let private unpublished = sampleOf (Obj [ "fresh", Bool false; "reasons", Arr [ Str "no_published_generation" ] ]) None None None
@@ -62,7 +62,7 @@ let private freshSecond = sampleOf (freshJ 2L snapshotB) (Some second) None None
 let private pendingFirst = sampleOf (notFreshJ 1L snapshotA [ "indexing_pending" ] [ "test" ] []) (Some first) (Some 100.5) None
 let private frameOfFirst = Fresh { Generation = 1L; SnapshotId = snapshotA; PublishedAtMs = 100250L; Revisions = first.Revisions }
 let private frameOfSecond = Fresh { Generation = 2L; SnapshotId = snapshotB; PublishedAtMs = 101500L; Revisions = second.Revisions }
-let private framePending = Indexing { Generation = 1L; SnapshotId = snapshotA; PendingSources = [ "test" ]; StaleSources = []; Reasons = [ "indexing_pending" ]; ChangedAtMs = Some 100500L }
+let private framePending = Indexing { Generation = 1L; SnapshotId = snapshotA; PendingSources = [ "test" ]; StaleSources = []; Reasons = [ "indexing_pending" ]; ChangedAtMs = Some 100500L; QueuedRetrievals = 0 }
 let private quiet = { defaultObserverOptions with KeepaliveInterval = TimeSpan.FromMinutes 10.0 }
 
 // Deterministic coherent samples and publication fences around the real Service.
@@ -160,11 +160,14 @@ let ``the readiness wire codec is exact and observer options are validated`` () 
         """{"state":"fresh","generation":7,"snapshot_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","published_at_ms":1763600000250,"revisions":{"site":null,"spec":"1111111111111111111111111111111111111111"}}""",
         encode (Fresh { Generation = 7L; SnapshotId = snapshotA; PublishedAtMs = 1763600000250L; Revisions = Map.ofList [ "spec", Some(String('1', 40)); "site", None ] }))
     Assert.Equal(
-        """{"state":"indexing","generation":7,"snapshot_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","pending_sources":["search","spec"],"stale_sources":[],"reasons":["indexing_pending"],"changed_at_ms":1763600001000}""",
-        encode (Indexing { Generation = 7L; SnapshotId = snapshotA; PendingSources = [ "search"; "spec" ]; StaleSources = []; Reasons = [ "indexing_pending" ]; ChangedAtMs = Some 1763600001000L }))
+        """{"state":"indexing","generation":7,"snapshot_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","pending_sources":["search","spec"],"stale_sources":[],"reasons":["indexing_pending"],"changed_at_ms":1763600001000,"queued_retrievals":0}""",
+        encode (Indexing { Generation = 7L; SnapshotId = snapshotA; PendingSources = [ "search"; "spec" ]; StaleSources = []; Reasons = [ "indexing_pending" ]; ChangedAtMs = Some 1763600001000L; QueuedRetrievals = 0 }))
     Assert.Equal(
-        """{"state":"indexing","generation":7,"snapshot_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","pending_sources":[],"stale_sources":["spec"],"reasons":["authoritative_observation_required"],"changed_at_ms":null}""",
-        encode (Indexing { Generation = 7L; SnapshotId = snapshotA; PendingSources = []; StaleSources = [ "spec" ]; Reasons = [ "authoritative_observation_required" ]; ChangedAtMs = None }))
+        """{"state":"indexing","generation":7,"snapshot_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","pending_sources":[],"stale_sources":["spec"],"reasons":["authoritative_observation_required"],"changed_at_ms":null,"queued_retrievals":0}""",
+        encode (Indexing { Generation = 7L; SnapshotId = snapshotA; PendingSources = []; StaleSources = [ "spec" ]; Reasons = [ "authoritative_observation_required" ]; ChangedAtMs = None; QueuedRetrievals = 0 }))
+    Assert.Equal(
+        """{"state":"crossing_held","generation":7,"snapshot_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","expected_sources":["search","spec"],"pending_sources":["spec"],"stale_sources":[],"reasons":["crossing_held"],"held_until_ms":1763600060000,"queued_retrievals":2,"changed_at_ms":1763600001000}""",
+        encode (CrossingHeld { Generation = 7L; SnapshotId = snapshotA; ExpectedSources = [ "search"; "spec" ]; PendingSources = [ "spec" ]; StaleSources = []; Reasons = [ "crossing_held" ]; HeldUntilMs = Some 1763600060000L; QueuedRetrievals = 2; ChangedAtMs = Some 1763600001000L }))
     Assert.Equal("""{"state":"unavailable","reason":"no_published_generation"}""", encode (Unavailable "no_published_generation"))
     for invalid in [ { defaultObserverOptions with Capacity = 0 }; { defaultObserverOptions with QueueDepth = 0 }
                      { defaultObserverOptions with KeepaliveInterval = TimeSpan.Zero }; { defaultObserverOptions with WriteTimeout = TimeSpan.Zero } ] do
@@ -228,7 +231,7 @@ let ``an observation deadline wakes a time only transition without polling`` () 
         // No SQLite write: only the sampled deadline can surface expiry.
         source.Set(sampleOf (notFreshJ 1L snapshotA [ "observation_stale_or_unknown" ] [] [ "test" ]) (Some first) (Some 100.05) None)
         let! stale = sink.Next()
-        Assert.Equal(Indexing { Generation = 1L; SnapshotId = snapshotA; PendingSources = []; StaleSources = [ "test" ]; Reasons = [ "observation_stale_or_unknown" ]; ChangedAtMs = Some 100050L }, stale)
+        Assert.Equal(Indexing { Generation = 1L; SnapshotId = snapshotA; PendingSources = []; StaleSources = [ "test" ]; Reasons = [ "observation_stale_or_unknown" ]; ChangedAtMs = Some 100050L; QueuedRetrievals = 0 }, stale)
         let reads = source.Reads
         do! Task.Delay 300
         Assert.Equal(reads, source.Reads)
@@ -308,7 +311,7 @@ let ``an overflowing observer is evicted explicitly and releases its slot`` () =
         use cancel = new CancellationTokenSource()
         let replacement = service.Observe(late.Sink, cancel.Token)
         let! current = late.Next()
-        Assert.Equal(Indexing { Generation = 2L; SnapshotId = snapshotB; PendingSources = [ "test" ]; StaleSources = []; Reasons = [ "indexing_pending" ]; ChangedAtMs = Some 101750L }, current)
+        Assert.Equal(Indexing { Generation = 2L; SnapshotId = snapshotB; PendingSources = [ "test" ]; StaleSources = []; Reasons = [ "indexing_pending" ]; ChangedAtMs = Some 101750L; QueuedRetrievals = 0 }, current)
         cancel.Cancel()
         let! _ = Assert.ThrowsAnyAsync<OperationCanceledException>(fun () -> joined replacement)
         ()
@@ -536,7 +539,7 @@ let ``sqlite publication pushes fresh then indexing then the next generation`` (
         release.SetResult()
         let! indexing = sink.Next()
         Assert.Equal(Indexing { Generation = 1L; SnapshotId = String('1', 64); PendingSources = [ "search"; "site"; "spec" ]; StaleSources = []
-                                Reasons = [ "indexing_pending" ]; ChangedAtMs = Some 1002000L }, indexing)
+                                Reasons = [ "indexing_pending" ]; ChangedAtMs = Some 1002000L; QueuedRetrievals = 0 }, indexing)
         let! next = sink.Next()
         let revisions = f.Heads |> List.map (fun (source, revision) -> source, (if source = "spec" then Some(String('e', 40)) else revision)) |> Map.ofList
         Assert.Equal(Fresh { Generation = 2L; SnapshotId = String('2', 64); PublishedAtMs = 1002000L; Revisions = revisions }, next)
@@ -694,7 +697,7 @@ let ``a sample that expires during binding is replaced before its initial frame`
         release.SetResult()
         let! initial = sink.Next()
         Assert.Equal(Indexing { Generation = 1L; SnapshotId = snapshotA; PendingSources = []; StaleSources = [ "test" ]
-                                Reasons = [ "observation_stale_or_unknown" ]; ChangedAtMs = Some 100025L }, initial)
+                                Reasons = [ "observation_stale_or_unknown" ]; ChangedAtMs = Some 100025L; QueuedRetrievals = 0 }, initial)
         Assert.Equal(2, source.Reads)
         cancel.Cancel()
         let! _ = Assert.ThrowsAnyAsync<OperationCanceledException>(fun () -> joined observing)
@@ -1575,7 +1578,7 @@ let ``historical replay rejects a generation published under a different corpus 
 
     // Configuration B keeps the source IDs and dependencies and changes only the tracked ref.
     let configB = Path.Combine(Path.GetDirectoryName corpus.Config, "corpus-b.json")
-    File.WriteAllText(configB, File.ReadAllText(corpus.Config).Replace("refs/heads/main", "refs/heads/release"))
+    File.WriteAllText(configB, File.ReadAllText(corpus.Config).Replace("refs/heads/main", "refs/heads/master"))
     Assert.NotEqual<string>(identity, Coordinator.configIdentity (fst (Coordinator.configSources configB)))
     do! withStoreAsync (Query.ManagedStore(corpus.Root, configB, corpus.Engine, promptFile)) (fun store -> task {
         let! replay = store.ObserveAsync(Some 0L, CancellationToken.None)

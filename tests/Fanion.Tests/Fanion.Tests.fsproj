@@ -28,6 +28,7 @@
     <Compile Include="EnglishTests.fs" />
     <Compile Include="ServeTests.fs" />
     <Compile Include="ObserveTests.fs" />
+    <Compile Include="CrossingTests.fs" />
   </ItemGroup>
   <ItemGroup>
     <!-- xunit.v3 builds a Microsoft.Testing.Platform executable; run bin/.../Fanion.Tests directly. -->

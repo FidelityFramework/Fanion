@@ -21,10 +21,15 @@ let private revisionPattern = Regex(@"\A(?:[0-9a-f]{40}|[0-9a-f]{64})\z", RegexO
 let private snapshotPattern = Regex(@"\A[0-9a-f]{64}\z", RegexOptions.Compiled)
 let eventKinds = set [ "push"; "site_deploy"; "spec_deploy"; "delete"; "reconcile" ]
 let futureTolerance = 5.0
-let settleSecondsDefault = 0.25
-let maxSettleSecondsDefault = 1.0
+let settleSecondsDefault = 3.0
+let maxSettleSecondsDefault = 15.0
 let transitionRetentionDefault = 512
 let maxObservationAgeDefault = 90.0
+let maxActiveFences = 8
+let releasedFenceRetention = 256
+let defaultFenceTtlSeconds = 60.0
+let maxFenceTtlSeconds = 300.0
+let manifestIdentityErrorMessage = "Corpus manifest identity differs from this state's configuration; use an explicit migration"
 
 /// Hosted wakeups only: capture Watch before reading SQLite, then await if still
 /// pending. The durable state remains authoritative, including after lost hints.
@@ -76,6 +81,8 @@ let private identifier (value: string) (label: string) =
     if isNull value || not (idPattern.IsMatch value) then raise (StateError(sprintf "Invalid %s; use 1–128 ASCII identifier characters" label))
     value
 
+let validateIdentifier (value: string) (label: string) = ignore (identifier value label)
+
 let private number (value: float) (label: string) (positive: bool) =
     let message = sprintf "%s must be a finite %s number" label (if positive then "positive" else "nonnegative")
     if Double.IsNaN value || Double.IsInfinity value || value < 0.0 || (positive && value = 0.0) then raise (StateError message)
@@ -84,10 +91,14 @@ let private number (value: float) (label: string) (positive: bool) =
 /// json.dumps(value, sort_keys=True, separators=(",", ":")) — ASCII payloads, so canonical bytes agree.
 let private jsonText (value: J) = toText canonicalStyle value
 
+type CrossingHold =
+    { ActiveFences: string list; ExpectedSources: string list; PendingSources: string list
+      HeldUntil: float; EarliestHeldUntil: float; Reasons: string list; ChangedAt: float }
+
 type Plan =
     { BaseGeneration: int64 option; DesiredEpoch: int64; DesiredRevisions: Map<string, string option>
       Targets: Map<string, string option>; ChangedSources: string list; ObservationRequired: string list
-      SettleUntil: float option; PlanId: string }
+      SettleUntil: float option; Crossing: CrossingHold option; PlanId: string }
 
 let private revisionsJ (revisions: Map<string, string option>) =
     Obj [ for kv in revisions -> kv.Key, (match kv.Value with Some r -> Str r | None -> Null) ]
@@ -113,7 +124,8 @@ type Generation =
 // One coherent read for readiness observers. Freshness keeps the exact shape
 // returned by State.Freshness; the timing fields never enter response JSON.
 type Observation =
-    { Freshness: J; Active: Generation option; ChangedAt: float option; Deadline: float option; CheckedAt: float }
+    { Freshness: J; Active: Generation option; ChangedAt: float option; Deadline: float option; CheckedAt: float
+      Crossing: CrossingHold option }
 
 // Readiness commits since the caller's cursor, or explicit truncation when
 // intermediate rows have already been pruned from the bounded journal.
@@ -126,20 +138,47 @@ type ObservationBatch =
     { Sequence: int64; History: ObservationHistory; Current: Observation; SampledAt: int64 }
 
 type private ObservationFacts =
-    { ObservedAt: (string * float option) list; Required: string list; Pending: string list; ChangedAt: float option }
+    { ObservedAt: (string * float option) list; Required: string list; Pending: string list
+      ChangedAt: float option; Crossing: CrossingHold option }
 
 // Readiness-affecting projection used to dedupe steady-state observation ticks;
 // observation age is compared separately at the commit clock.
 let private readinessKey (facts: ObservationFacts) =
-    [ for source, at in facts.ObservedAt -> source, at.IsSome ], facts.Required, facts.Pending, facts.ChangedAt
+    [ for source, at in facts.ObservedAt -> source, at.IsSome ], facts.Required, facts.Pending, facts.ChangedAt, facts.Crossing
 
 let private earliest values = match values with [] -> None | values -> Some(List.min values)
+
+let private crossingJ (crossing: CrossingHold) =
+    let strings values = Arr (List.map Str values)
+    Obj [ "active_fences", strings crossing.ActiveFences
+          "expected_sources", strings crossing.ExpectedSources
+          "pending_sources", strings crossing.PendingSources
+          "held_until", Float crossing.HeldUntil
+          "earliest_held_until", Float crossing.EarliestHeldUntil
+          "reasons", strings crossing.Reasons
+          "changed_at", Float crossing.ChangedAt ]
 
 let private factsJ (facts: ObservationFacts) =
     let strings values = Arr (List.map Str values)
     let timestamp = function Some t -> Float t | None -> Null
-    Obj [ "observed_at", Obj [ for source, at in facts.ObservedAt -> source, timestamp at ]
-          "required", strings facts.Required; "pending", strings facts.Pending; "changed_at", timestamp facts.ChangedAt ]
+    Obj ([ "observed_at", Obj [ for source, at in facts.ObservedAt -> source, timestamp at ]
+           "required", strings facts.Required; "pending", strings facts.Pending; "changed_at", timestamp facts.ChangedAt ]
+         @ (match facts.Crossing with Some crossing -> [ "crossing", crossingJ crossing ] | None -> []))
+
+let private parseCrossing (value: JsonValue) : CrossingHold =
+    let strings name = JsonInput.property name value |> JsonInput.items |> List.map JsonInput.string
+    let heldUntil = JsonInput.property "held_until" value |> JsonInput.number
+    let earliestHeldUntil =
+        match Json.prop "earliest_held_until" value with
+        | Some v -> JsonInput.number v
+        | None -> heldUntil
+    { ActiveFences = strings "active_fences"
+      ExpectedSources = strings "expected_sources"
+      PendingSources = strings "pending_sources"
+      HeldUntil = heldUntil
+      EarliestHeldUntil = earliestHeldUntil
+      Reasons = strings "reasons"
+      ChangedAt = JsonInput.property "changed_at" value |> JsonInput.number }
 
 let private parseFacts text =
     let document = JsonInput.parse text
@@ -148,8 +187,13 @@ let private parseFacts text =
     let timestamp = function
         | JsonValue.Null -> None
         | value -> Some(JsonInput.number value)
+    let crossing =
+        match Json.prop "crossing" document with
+        | None | Some JsonValue.Null -> None
+        | Some value -> Some(parseCrossing value)
     { ObservedAt = JsonInput.fields (property "observed_at") |> List.map (fun (source, at) -> source, timestamp at)
-      Required = strings "required"; Pending = strings "pending"; ChangedAt = timestamp (property "changed_at") }
+      Required = strings "required"; Pending = strings "pending"; ChangedAt = timestamp (property "changed_at")
+      Crossing = crossing }
 
 // The one observation-age rule shared by freshness, replay and the readiness journal.
 let private staleSources now maximumAge (facts: ObservationFacts) =
@@ -167,6 +211,7 @@ let private assess now maximumAge snapshotId (latest: Generation option) (select
           if not facts.Required.IsEmpty then yield "authoritative_observation_required"
           if not stale.IsEmpty then yield "observation_stale_or_unknown"
           if not facts.Pending.IsEmpty then yield "indexing_pending"
+          if facts.Crossing.IsSome then yield "crossing_held"
           if mismatch then yield "required_revision_mismatch" ]
     let strings values = Arr (List.map Str values)
     let freshness =
@@ -178,15 +223,17 @@ let private assess now maximumAge snapshotId (latest: Generation option) (select
               "checked_at", Float now; "max_observation_age", Float maximumAge ]
     let since =
         (facts.ChangedAt |> Option.toList)
+        @ (facts.Crossing |> Option.map (fun c -> c.ChangedAt) |> Option.toList)
         @ [ for _, at in facts.ObservedAt do
                 match at with Some t when now - t > maximumAge -> yield t + maximumAge | _ -> () ]
     let deadlines =
-        [ for _, at in facts.ObservedAt do
-            match at with
-            | Some t when t > now + futureTolerance -> yield t - futureTolerance
-            | Some t when now - t <= maximumAge -> yield t + maximumAge
-            | _ -> () ]
-    { Freshness = freshness; Active = latest; ChangedAt = earliest since; Deadline = earliest deadlines; CheckedAt = now }
+        (facts.Crossing |> Option.map (fun c -> c.EarliestHeldUntil) |> Option.toList)
+        @ [ for _, at in facts.ObservedAt do
+                match at with
+                | Some t when t > now + futureTolerance -> yield t - futureTolerance
+                | Some t when now - t <= maximumAge -> yield t + maximumAge
+                | _ -> () ]
+    { Freshness = freshness; Active = latest; ChangedAt = earliest since; Deadline = earliest deadlines; CheckedAt = now; Crossing = facts.Crossing }
 
 type private Row = Dictionary<string, obj>
 
@@ -253,10 +300,12 @@ type State(path: string, allowedSources: (string * string list) list, ?leaseSeco
               "CREATE TABLE IF NOT EXISTS events(seq INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT UNIQUE NOT NULL, source_id TEXT NOT NULL REFERENCES sources(source_id), event_kind TEXT NOT NULL, created_at REAL NOT NULL)"
               "CREATE INDEX IF NOT EXISTS source_events ON events(source_id,created_at,seq)"
               "CREATE TABLE IF NOT EXISTS invalidations(id INTEGER PRIMARY KEY AUTOINCREMENT, source_id TEXT NOT NULL REFERENCES sources(source_id), reason TEXT NOT NULL, created_at REAL NOT NULL)"
-              "CREATE TABLE IF NOT EXISTS builds(token TEXT PRIMARY KEY, plan TEXT NOT NULL, status TEXT NOT NULL, started_at REAL NOT NULL, lease_until REAL NOT NULL, finished_at REAL, error TEXT, snapshot_id TEXT)"
+              "CREATE TABLE IF NOT EXISTS builds(token TEXT PRIMARY KEY, plan TEXT NOT NULL, status TEXT NOT NULL, started_at REAL NOT NULL, lease_until REAL NOT NULL, finished_at REAL, error TEXT, snapshot_id TEXT, invalidation_watermark INTEGER NOT NULL DEFAULT 0)"
               "CREATE UNIQUE INDEX IF NOT EXISTS one_running_build ON builds((1)) WHERE status='running'"
               "CREATE TABLE IF NOT EXISTS generations(generation INTEGER PRIMARY KEY AUTOINCREMENT, snapshot_id TEXT NOT NULL, revisions TEXT NOT NULL, published_at REAL NOT NULL, build_token TEXT UNIQUE NOT NULL REFERENCES builds(token))"
-              "CREATE TABLE IF NOT EXISTS readiness_transitions(seq INTEGER PRIMARY KEY AUTOINCREMENT, generation INTEGER NOT NULL REFERENCES generations(generation), committed_at REAL NOT NULL, facts TEXT NOT NULL)" ] do exec statement
+              "CREATE TABLE IF NOT EXISTS readiness_transitions(seq INTEGER PRIMARY KEY AUTOINCREMENT, generation INTEGER NOT NULL REFERENCES generations(generation), committed_at REAL NOT NULL, facts TEXT NOT NULL)"
+              "CREATE TABLE IF NOT EXISTS crossing_fences(fence_id TEXT PRIMARY KEY, expected_sources TEXT NOT NULL, arrived_sources TEXT NOT NULL, baseline_revisions TEXT NOT NULL, baseline_last_hints TEXT NOT NULL DEFAULT '{}', baseline_observed_hints TEXT NOT NULL DEFAULT '{}', reason TEXT NOT NULL, created_at REAL NOT NULL, held_until REAL NOT NULL, released_at REAL, release_reason TEXT)"
+              "CREATE INDEX IF NOT EXISTS active_crossing_fences ON crossing_fences(held_until) WHERE released_at IS NULL" ] do exec statement
         let transitionsSql =
             State.Query connection "SELECT sql FROM sqlite_master WHERE type='table' AND name='readiness_transitions'" []
             |> List.tryHead |> Option.map (fun r -> str r "sql") |> Option.defaultValue ""
@@ -267,15 +316,25 @@ type State(path: string, allowedSources: (string * string list) list, ?leaseSeco
             exec "ALTER TABLE readiness_transitions_new RENAME TO readiness_transitions"
         let columns = (use c = connection.CreateCommand() in c.CommandText <- "PRAGMA table_info(sources)"; readRows c |> List.map (fun r -> str r "name"))
         let generationColumns = (use c = connection.CreateCommand() in c.CommandText <- "PRAGMA table_info(generations)"; readRows c |> List.map (fun r -> str r "name"))
+        let buildColumns = (use c = connection.CreateCommand() in c.CommandText <- "PRAGMA table_info(builds)"; readRows c |> List.map (fun r -> str r "name"))
+        let fenceColumns = (use c = connection.CreateCommand() in c.CommandText <- "PRAGMA table_info(crossing_fences)"; readRows c |> List.map (fun r -> str r "name"))
         // Legacy generations keep NULL: replay cannot prove their configuration and fails closed.
         if not (List.contains "configuration_sha256" generationColumns) then
             exec "ALTER TABLE generations ADD COLUMN configuration_sha256 TEXT"
+        if not (List.contains "invalidation_watermark" buildColumns) then
+            exec "ALTER TABLE builds ADD COLUMN invalidation_watermark INTEGER NOT NULL DEFAULT 0"
+        if not (List.contains "baseline_last_hints" fenceColumns) then
+            exec "ALTER TABLE crossing_fences ADD COLUMN baseline_last_hints TEXT NOT NULL DEFAULT '{}'"
+        if not (List.contains "baseline_observed_hints" fenceColumns) then
+            exec "ALTER TABLE crossing_fences ADD COLUMN baseline_observed_hints TEXT NOT NULL DEFAULT '{}'"
         if not (List.contains "changed_at" columns) then
             exec "ALTER TABLE sources ADD COLUMN changed_at REAL"
             exec "UPDATE sources SET changed_at=observed_at WHERE changed_at IS NULL"
         if not (List.contains "first_changed_at" columns) then
             exec "ALTER TABLE sources ADD COLUMN first_changed_at REAL"
             exec "UPDATE sources SET first_changed_at=changed_at WHERE indexed_known=0 OR desired_revision IS NOT indexed_revision"
+        if not (List.contains "settle_bypassed" columns) then
+            exec "ALTER TABLE sources ADD COLUMN settle_bypassed INTEGER NOT NULL DEFAULT 0"
         let existing = (use c = connection.CreateCommand() in c.CommandText <- "SELECT value FROM metadata WHERE key='configuration'"; readRows c)
         match existing with
         | row :: _ when str row "value" <> configuration -> raise (StateError "Allowed sources/dependencies differ from this state's configuration; use an explicit migration")
@@ -300,7 +359,7 @@ type State(path: string, allowedSources: (string * string list) list, ?leaseSeco
     /// BEGIN IMMEDIATE also fences reads behind any uncommitted writer: an early
     /// filesystem notification cannot consume a wakeup and observe pre-commit state.
     /// Expire stale leases, run `body`, and commit on success.
-    member private _.Transaction(body: SqliteConnection -> float -> int64 -> 'T) : 'T =
+    member private this.TransactionWithExpiry(body: SqliteConnection -> float -> int64 -> int -> 'T) : 'T =
         use connection = connect ()
         let exec text = (use c = connection.CreateCommand() in c.CommandText <- text; c.ExecuteNonQuery() |> ignore)
         exec "BEGIN IMMEDIATE"
@@ -311,12 +370,23 @@ type State(path: string, allowedSources: (string * string list) list, ?leaseSeco
              c.CommandText <- "UPDATE builds SET status='expired',finished_at=$n WHERE status='running' AND lease_until<=$n"
              c.Parameters.AddWithValue("$n", current) |> ignore
              c.ExecuteNonQuery() |> ignore)
-            let result = body connection current sampledAt
+            let expiredFences =
+                use c = connection.CreateCommand()
+                c.CommandText <- "UPDATE crossing_fences SET released_at=$n,release_reason='ttl_expired' WHERE released_at IS NULL AND held_until<=$n"
+                c.Parameters.AddWithValue("$n", current) |> ignore
+                c.ExecuteNonQuery()
+            if expiredFences > 0 then
+                State.PruneReleasedFences connection
+                this.RecordReadiness(connection, current)
+            let result = body connection current sampledAt expiredFences
             exec "COMMIT"
             result
         with _ ->
             (try exec "ROLLBACK" with _ -> ())
             reraise ()
+
+    member private this.Transaction(body: SqliteConnection -> float -> int64 -> 'T) : 'T =
+        this.TransactionWithExpiry(fun connection current sampledAt _ -> body connection current sampledAt)
 
     member private _.Source(source: string) =
         identifier source "source ID" |> ignore
@@ -346,7 +416,88 @@ type State(path: string, allowedSources: (string * string list) list, ?leaseSeco
         c.CommandText <- "SELECT last_insert_rowid()"
         Convert.ToInt64(c.ExecuteScalar())
 
-    member private _.ComputePlan(connection: SqliteConnection) : Plan =
+    static member private ParseStringList(text: string) : string list =
+        JsonInput.parse text |> JsonInput.items |> List.map JsonInput.string
+
+    static member private StringListJson(values: string list) : string =
+        jsonText (Arr (List.map Str values))
+
+    static member private ParseHintMap(text: string) : Map<string, int64> =
+        JsonInput.parse text
+        |> JsonInput.fields
+        |> List.map (fun (name, value) -> name, JsonInput.int64 value)
+        |> Map.ofList
+
+    static member private HintMapJson(values: Map<string, int64>) : string =
+        jsonText (Obj [ for kv in values -> kv.Key, Int kv.Value ])
+
+    static member private PruneReleasedFences(connection: SqliteConnection) =
+        State.Execute connection
+            "DELETE FROM crossing_fences WHERE released_at IS NOT NULL AND fence_id NOT IN (SELECT fence_id FROM crossing_fences WHERE released_at IS NOT NULL ORDER BY released_at DESC, created_at DESC, fence_id DESC LIMIT $limit)"
+            [ "$limit", box releasedFenceRetention ]
+
+    static member private ClearSettleForSources(connection: SqliteConnection, sourceIds: string seq) =
+        for source in sourceIds |> Set.ofSeq do
+            State.Execute connection
+                "UPDATE sources SET settle_bypassed=1 WHERE source_id=$s AND observed_at IS NOT NULL AND (indexed_known=0 OR desired_revision IS NOT indexed_revision)"
+                [ "$s", box source ]
+
+    static member private CheckManifestIdentity(connection: SqliteConnection, identity: string, throwOnMismatch: bool) : bool =
+        if isNull identity || not (snapshotPattern.IsMatch identity) then
+            raise (StateError "manifest_identity must be a lowercase 64-hex digest")
+        match State.Query connection "SELECT value FROM metadata WHERE key='manifest_identity'" [] with
+        | row :: _ ->
+            if str row "value" = identity then true
+            elif throwOnMismatch then raise (StateError manifestIdentityErrorMessage)
+            else false
+        | [] ->
+            let conflictingGeneration =
+                State.Query connection "SELECT configuration_sha256 FROM generations ORDER BY generation DESC LIMIT 1" []
+                |> List.tryHead
+                |> Option.bind (fun r -> match str r "configuration_sha256" with null -> None | v -> Some v)
+                |> Option.exists (fun recorded -> recorded <> identity)
+            if conflictingGeneration then
+                if throwOnMismatch then raise (StateError manifestIdentityErrorMessage)
+                else false
+            else
+                true
+
+    member private _.ActiveCrossing(connection: SqliteConnection, obsRequired: Set<string>) : CrossingHold option =
+        let rows = State.Query connection "SELECT * FROM crossing_fences WHERE released_at IS NULL ORDER BY created_at, fence_id" []
+        if rows.IsEmpty then None
+        else
+            let sortUnique (values: string seq) = values |> Set.ofSeq |> Set.toList |> List.sortWith (fun a b -> String.CompareOrdinal(a, b))
+            let expected = ResizeArray<string>()
+            let pending = ResizeArray<string>()
+            let reasons = ResizeArray<string>()
+            let fences = ResizeArray<string>()
+            let mutable heldUntil = Double.NegativeInfinity
+            let mutable earliestHeldUntil = Double.PositiveInfinity
+            let mutable changedAt = Double.PositiveInfinity
+            for row in rows do
+                fences.Add(str row "fence_id")
+                let exp = State.ParseStringList(str row "expected_sources")
+                let arr = State.ParseStringList(str row "arrived_sources") |> Set.ofList
+                expected.AddRange exp
+                for s in exp do
+                    if not (arr.Contains s) || obsRequired.Contains s then
+                        pending.Add s
+                let reason = str row "reason"
+                if not (reasons.Contains reason) then reasons.Add reason
+                let rowHeldUntil = (num row "held_until").Value
+                heldUntil <- max heldUntil rowHeldUntil
+                earliestHeldUntil <- min earliestHeldUntil rowHeldUntil
+                changedAt <- min changedAt (num row "created_at").Value
+            Some
+                { ActiveFences = fences |> Seq.sortWith (fun a b -> String.CompareOrdinal(a, b)) |> Seq.toList
+                  ExpectedSources = sortUnique expected
+                  PendingSources = sortUnique pending
+                  HeldUntil = heldUntil
+                  EarliestHeldUntil = earliestHeldUntil
+                  Reasons = List.ofSeq reasons
+                  ChangedAt = changedAt }
+
+    member private this.ComputePlan(connection: SqliteConnection) : Plan =
         let rows = State.Query connection "SELECT * FROM sources ORDER BY source_id" [] |> List.map (fun r -> str r "source_id", r) |> Map.ofList
         let changed =
             rows |> Map.filter (fun _ row -> (num row "observed_at").IsSome && (int64Of row "indexed_known" = 0L || str row "desired_revision" <> str row "indexed_revision")) |> Map.keys |> Set.ofSeq
@@ -357,21 +508,24 @@ type State(path: string, allowedSources: (string * string list) list, ?leaseSeco
             if expanded = targets then expanding <- false else targets <- expanded
         let generation = State.Query connection "SELECT MAX(generation) AS g FROM generations" [] |> List.head
         let baseGeneration = match generation.["g"] with null -> None | v -> Some(Convert.ToInt64 v)
-        let changeTimes = [ for source in changed -> (match num rows.[source] "changed_at" with Some c -> c | None -> (num rows.[source] "observed_at").Value) ]
-        let firstChangeTimes = [ for source in changed ->
+        let unsettled = changed |> Set.filter (fun source -> int64Of rows.[source] "settle_bypassed" = 0L)
+        let changeTimes = [ for source in unsettled -> (match num rows.[source] "changed_at" with Some c -> c | None -> (num rows.[source] "observed_at").Value) ]
+        let firstChangeTimes = [ for source in unsettled ->
                                     num rows.[source] "first_changed_at"
                                     |> Option.orElseWith (fun () -> num rows.[source] "changed_at")
                                     |> Option.defaultWith (fun () -> (num rows.[source] "observed_at").Value) ]
         let settleUntil = if changeTimes.IsEmpty then None else Some(min (List.max changeTimes + settleSeconds) (List.min firstChangeTimes + maxSettleSeconds))
         let epoch = Int64.Parse(str (State.Query connection "SELECT value FROM metadata WHERE key='desired_epoch'" [] |> List.head) "value")
         let revisionOf (row: Row) = match str row "desired_revision" with null -> None | r -> Some r
+        let observationRequired = [ for kv in rows do if (num kv.Value "observed_at").IsNone || int64Of kv.Value "observed_hint" < int64Of kv.Value "last_hint" then yield kv.Key ]
+        let crossing = this.ActiveCrossing(connection, Set.ofList observationRequired)
         let plan =
             { BaseGeneration = baseGeneration; DesiredEpoch = epoch
               DesiredRevisions = rows |> Map.filter (fun _ row -> (num row "observed_at").IsSome) |> Map.map (fun _ row -> revisionOf row)
               Targets = targets |> Seq.map (fun s -> s, revisionOf rows.[s]) |> Map.ofSeq
               ChangedSources = changed |> Set.toList |> List.sortWith (fun a b -> String.CompareOrdinal(a, b))
-              ObservationRequired = [ for kv in rows do if (num kv.Value "observed_at").IsNone || int64Of kv.Value "observed_hint" < int64Of kv.Value "last_hint" then yield kv.Key ]
-              SettleUntil = settleUntil; PlanId = "" }
+              ObservationRequired = observationRequired
+              SettleUntil = settleUntil; Crossing = crossing; PlanId = "" }
         let planId = Convert.ToHexString(SHA256.HashData(Text.Encoding.UTF8.GetBytes(jsonText (planBody plan)))).ToLowerInvariant()
         { plan with PlanId = planId }
 
@@ -390,7 +544,7 @@ type State(path: string, allowedSources: (string * string list) list, ?leaseSeco
                         | Some t -> yield num row "first_changed_at" |> Option.orElseWith (fun () -> num row "changed_at") |> Option.defaultValue t
                         | None -> () ]
         { ObservedAt = [ for row in rows -> str row "source_id", num row "observed_at" ]
-          Required = plan.ObservationRequired; Pending = List.ofSeq plan.Targets.Keys; ChangedAt = earliest since }
+          Required = plan.ObservationRequired; Pending = List.ofSeq plan.Targets.Keys; ChangedAt = earliest since; Crossing = plan.Crossing }
 
     // Only readiness-changing writes call this, before their existing COMMIT.
     // The journal references generation rows and keeps only a bounded suffix.
@@ -435,11 +589,195 @@ type State(path: string, allowedSources: (string * string list) list, ?leaseSeco
 
     member this.PendingPlan() : Plan = this.Transaction(fun connection _ _ -> this.ComputePlan connection)
 
-    member this.EventHint(eventId: string, sourceId: string, eventKind: string) : J =
+    member this.ManifestIdentity() : string option =
+        this.Transaction(fun connection _ _ ->
+            State.Query connection "SELECT value FROM metadata WHERE key='manifest_identity'" []
+            |> List.tryHead
+            |> Option.map (fun row -> str row "value"))
+
+    member this.RebindManifestIdentity(identity: string, sourceIds: string list, reason: string) : bool =
+        if isNull identity || not (snapshotPattern.IsMatch identity) then
+            raise (StateError "manifest_identity must be a lowercase 64-hex digest")
+        if sourceIds.Length < 1 || sourceIds.Length > dependencies.Count then
+            raise (StateError "Invalidation needs a nonempty bounded source list")
+        for source in sourceIds do this.Source source
+        if sourceIds.Length <> (sourceIds |> List.distinct).Length then
+            raise (StateError "Invalidation source IDs must be unique")
+        if isNull reason || reason.Trim() = "" || reason.Length > 1024 then
+            raise (StateError "Invalidation reason must be 1–1024 characters")
+        this.Transaction(fun connection now _ ->
+            let invalidateAll () =
+                for source in sourceIds do
+                    State.Execute connection
+                        "UPDATE sources SET indexed_known=0,changed_at=$t,first_changed_at=COALESCE(first_changed_at,$t),settle_bypassed=0 WHERE source_id=$s"
+                        [ "$s", box source; "$t", box now ]
+                    State.Execute connection
+                        "INSERT INTO invalidations(source_id,reason,created_at) VALUES ($s,$r,$t)"
+                        [ "$s", box source; "$r", box reason; "$t", box now ]
+                State.Execute connection "UPDATE metadata SET value=CAST(value AS INTEGER)+1 WHERE key='desired_epoch'" []
+                this.RecordReadiness(connection, now)
+            match State.Query connection "SELECT value FROM metadata WHERE key='manifest_identity'" [] with
+            | row :: _ when str row "value" = identity -> false
+            | row :: _ ->
+                State.Execute connection "UPDATE metadata SET value=$id WHERE key='manifest_identity'" [ "$id", box identity ]
+                invalidateAll ()
+                true
+            | [] ->
+                let conflictingGeneration =
+                    State.Query connection "SELECT configuration_sha256 FROM generations ORDER BY generation DESC LIMIT 1" []
+                    |> List.tryHead
+                    |> Option.bind (fun r -> match str r "configuration_sha256" with null -> None | v -> Some v)
+                    |> Option.exists (fun recorded -> recorded <> identity)
+                State.Execute connection "INSERT INTO metadata VALUES ('manifest_identity',$id)" [ "$id", box identity ]
+                if conflictingGeneration then
+                    invalidateAll ()
+                    true
+                else
+                    false)
+
+    member this.VerifyManifestIdentity(identity: string) : bool =
+        this.Transaction(fun connection _ _ ->
+            State.CheckManifestIdentity(connection, identity, false))
+
+    member this.NextCrossingDelay() : TimeSpan option =
+        this.TransactionWithExpiry(fun connection now _ expired ->
+            match State.Query connection "SELECT MIN(held_until) AS h FROM crossing_fences WHERE released_at IS NULL" [] with
+            | row :: _ ->
+                match num row "h" with
+                | Some heldUntil -> Some(TimeSpan.FromMilliseconds(Math.Min(Math.Ceiling(max (heldUntil - now) 0.0 * 1000.0) + 1.0, 86_400_000.0)))
+                | None -> if expired > 0 then Some TimeSpan.Zero else None
+            | [] -> if expired > 0 then Some TimeSpan.Zero else None)
+
+    member this.RunningBuildTokens() : Set<string> =
+        this.Transaction(fun connection _ _ ->
+            State.Query connection "SELECT token FROM builds WHERE status='running'" []
+            |> List.map (fun row -> str row "token")
+            |> Set.ofList)
+
+    member this.ReclaimOrphanedBuilds(reason: string) : int =
+        if isNull reason || reason.Trim() = "" || reason.Length > 1024 then
+            raise (StateError "Reclaim reason must be 1–1024 characters")
+        this.Transaction(fun connection now _ ->
+            use c = connection.CreateCommand()
+            c.CommandText <- "UPDATE builds SET status='abandoned',error=$e,finished_at=$n WHERE status='running'"
+            c.Parameters.AddWithValue("$e", box reason) |> ignore
+            c.Parameters.AddWithValue("$n", box now) |> ignore
+            c.ExecuteNonQuery())
+
+    member this.HoldCrossing(fenceId: string, expectedSources: string list, ttlSeconds: float, reason: string, ?expectedManifestIdentity: string) : J =
+        identifier fenceId "fence ID" |> ignore
+        if expectedSources.IsEmpty then raise (StateError "Crossing fence requires at least one expected source")
+        for source in expectedSources do this.Source source
+        if expectedSources.Length <> (expectedSources |> List.distinct).Length then
+            raise (StateError "Crossing fence expected_sources must not contain duplicates")
+        let sortedExpected = expectedSources |> List.sortWith (fun a b -> String.CompareOrdinal(a, b))
+        let ttlSeconds = number ttlSeconds "ttl_seconds" true
+        if ttlSeconds > maxFenceTtlSeconds then
+            raise (StateError (sprintf "ttl_seconds must be at most %.0f" maxFenceTtlSeconds))
+        if isNull reason || reason.Trim() = "" || reason.Length > 512 then
+            raise (StateError "Crossing fence reason must be 1–512 characters")
+        let receipt (expected: string list) (arrived: string list) (heldUntil: float) (createdAt: float) (fenceReason: string) (duplicate: bool) =
+            let arrivedSet = Set.ofList arrived
+            let pending = expected |> List.filter (fun s -> not (arrivedSet.Contains s))
+            Obj [ "fence_id", Str fenceId
+                  "status", Str "held"
+                  "held_until", Float heldUntil
+                  "created_at", Float createdAt
+                  "expected_sources", Arr (List.map Str expected)
+                  "arrived_sources", Arr (List.map Str arrived)
+                  "pending_sources", Arr (List.map Str pending)
+                  "reason", Str fenceReason
+                  "duplicate", Bool duplicate ]
+        this.Transaction(fun connection now _ ->
+            expectedManifestIdentity |> Option.iter (fun id -> State.CheckManifestIdentity(connection, id, true) |> ignore)
+            match State.Query connection "SELECT * FROM crossing_fences WHERE fence_id=$id" [ "$id", box fenceId ] with
+            | existing :: _ ->
+                if not (isNull existing.["released_at"]) then
+                    raise (StateError "Fence ID has already been released")
+                let existingExpected = State.ParseStringList(str existing "expected_sources")
+                let existingReason = str existing "reason"
+                if existingExpected <> sortedExpected || existingReason <> reason then
+                    raise (StateError "Fence ID reused with different contents")
+                let existingArrived = State.ParseStringList(str existing "arrived_sources")
+                receipt existingExpected existingArrived (num existing "held_until").Value (num existing "created_at").Value existingReason true
+            | [] ->
+                let activeCount = State.Query connection "SELECT COUNT(*) AS c FROM crossing_fences WHERE released_at IS NULL" [] |> List.head |> fun r -> int64Of r "c"
+                if activeCount >= int64 maxActiveFences then
+                    raise (StateError "Maximum active crossing fences reached")
+                let baselines =
+                    [ for source in sortedExpected ->
+                        let row = State.Query connection "SELECT desired_revision,last_hint,observed_hint FROM sources WHERE source_id=$s" [ "$s", box source ] |> List.head
+                        source, (match str row "desired_revision" with null -> None | r -> Some r), int64Of row "last_hint", int64Of row "observed_hint" ]
+                let baselineRevisions = baselines |> List.map (fun (s, r, _, _) -> s, r) |> Map.ofList
+                let baselineLastHints = baselines |> List.map (fun (s, _, l, _) -> s, l) |> Map.ofList
+                let baselineObservedHints = baselines |> List.map (fun (s, _, _, o) -> s, o) |> Map.ofList
+                let heldUntil = now + ttlSeconds
+                State.Execute connection
+                    "INSERT INTO crossing_fences(fence_id,expected_sources,arrived_sources,baseline_revisions,baseline_last_hints,baseline_observed_hints,reason,created_at,held_until) VALUES ($id,$exp,'[]',$base,$baseLast,$baseObs,$reason,$created,$until)"
+                    [ "$id", box fenceId
+                      "$exp", box (State.StringListJson sortedExpected)
+                      "$base", box (jsonText (revisionsJ baselineRevisions))
+                      "$baseLast", box (State.HintMapJson baselineLastHints)
+                      "$baseObs", box (State.HintMapJson baselineObservedHints)
+                      "$reason", box reason
+                      "$created", box now
+                      "$until", box heldUntil ]
+                this.RecordReadiness(connection, now)
+                receipt sortedExpected [] heldUntil now reason false)
+
+    member this.ReleaseCrossing(fenceId: string, ?reason: string, ?expectedManifestIdentity: string) : J =
+        identifier fenceId "fence ID" |> ignore
+        let releaseReason = defaultArg reason "manual_release"
+        if isNull releaseReason || releaseReason.Trim() = "" || releaseReason.Length > 512 then
+            raise (StateError "Release reason must be 1–512 characters")
+        this.Transaction(fun connection now _ ->
+            expectedManifestIdentity |> Option.iter (fun id -> State.CheckManifestIdentity(connection, id, true) |> ignore)
+            match State.Query connection "SELECT * FROM crossing_fences WHERE fence_id=$id" [ "$id", box fenceId ] with
+            | [] -> raise (StateError "Unknown crossing fence")
+            | row :: _ ->
+                let expected = State.ParseStringList(str row "expected_sources")
+                let arrived = State.ParseStringList(str row "arrived_sources")
+                match num row "released_at" with
+                | Some releasedAt ->
+                    Obj [ "fence_id", Str fenceId
+                          "status", Str "released"
+                          "released_at", Float releasedAt
+                          "release_reason", Str (str row "release_reason")
+                          "expected_sources", Arr (List.map Str expected)
+                          "arrived_sources", Arr (List.map Str arrived)
+                          "already_released", Bool true ]
+                | None ->
+                    State.Execute connection
+                        "UPDATE crossing_fences SET released_at=$n,release_reason=$r WHERE fence_id=$id"
+                        [ "$n", box now; "$r", box releaseReason; "$id", box fenceId ]
+                    let arrivedSet = Set.ofList arrived
+                    for sourceId in expected do
+                        if not (arrivedSet.Contains sourceId) then
+                            let hintId = sprintf "crossing-release:%s:%s:%s" fenceId sourceId (Guid.NewGuid().ToString("N"))
+                            State.Execute connection
+                                "INSERT INTO events(event_id,source_id,event_kind,created_at) VALUES ($e,$s,'reconcile',$t)"
+                                [ "$e", box hintId; "$s", box sourceId; "$t", box now ]
+                            let seq = State.LastRowId connection
+                            State.Execute connection
+                                "UPDATE sources SET last_hint=$h WHERE source_id=$s"
+                                [ "$h", box seq; "$s", box sourceId ]
+                    State.ClearSettleForSources(connection, expected)
+                    State.PruneReleasedFences connection
+                    this.RecordReadiness(connection, now)
+                    Obj [ "fence_id", Str fenceId
+                          "status", Str "released"
+                          "released_at", Float now
+                          "release_reason", Str releaseReason
+                          "expected_sources", Arr (List.map Str expected)
+                          "arrived_sources", Arr (List.map Str arrived)
+                          "already_released", Bool false ])
+
+    member this.EventHint(eventId: string, sourceId: string, eventKind: string, ?expectedManifestIdentity: string) : J =
         identifier eventId "event ID" |> ignore
         this.Source sourceId
         if isNull eventKind || not (eventKinds.Contains eventKind) then raise (StateError "Unknown event kind")
         this.Transaction(fun connection now _ ->
+            expectedManifestIdentity |> Option.iter (fun id -> State.CheckManifestIdentity(connection, id, true) |> ignore)
             match State.Query connection "SELECT source_id,event_kind FROM events WHERE event_id=$e" [ "$e", box eventId ] with
             | existing :: _ ->
                 if str existing "source_id" <> sourceId || str existing "event_kind" <> eventKind then raise (StateError "Event ID reused with different contents")
@@ -459,6 +797,20 @@ type State(path: string, allowedSources: (string * string list) list, ?leaseSeco
             if observedAt > now + futureTolerance then raise (StateError "Observation is too far in the future")
             let changed, ignored = ResizeArray<string>(), ResizeArray<string>()
             let mutable updated = false
+            let mutable fenceUpdated = false
+            let mutable fenceReleased = false
+            let releasedSources = ResizeArray<string>()
+            let activeFences =
+                State.Query connection "SELECT * FROM crossing_fences WHERE released_at IS NULL ORDER BY created_at, fence_id" []
+                |> List.map (fun row ->
+                    {| FenceId = str row "fence_id"
+                       Expected = State.ParseStringList(str row "expected_sources")
+                       Arrived = HashSet<string>(State.ParseStringList(str row "arrived_sources"))
+                       Baseline = JsonInput.parse (str row "baseline_revisions") |> State.ParseRevisions
+                       BaselineLastHints = State.ParseHintMap(str row "baseline_last_hints")
+                       BaselineObservedHints = State.ParseHintMap(str row "baseline_observed_hints")
+                       CreatedAt = (num row "created_at").Value
+                       Dirty = ref false |})
             for (source, revision) in heads |> List.sortWith (fun (a, _) (b, _) -> String.CompareOrdinal(a, b)) do
                 let row = State.Query connection "SELECT * FROM sources WHERE source_id=$s" [ "$s", box source ] |> List.head
                 let previous = num row "observed_at"
@@ -466,18 +818,73 @@ type State(path: string, allowedSources: (string * string list) list, ?leaseSeco
                 if previous.IsSome && observedAt < previous.Value then ignored.Add source
                 else
                     if previous = Some observedAt && desired <> revision then raise (StateError "Conflicting revisions at the same observation timestamp")
+                    let prevHint = int64Of row "observed_hint"
+                    let hint = State.Query connection "SELECT COALESCE(MAX(seq),0) AS h FROM events WHERE source_id=$s AND created_at<=$t" [ "$s", box source; "$t", box observedAt ] |> List.head
+                    let newHint = int64Of hint "h"
+                    let releaseBypassSeq =
+                        if newHint > prevHint then
+                            State.Query connection
+                                "SELECT COALESCE(MAX(seq),0) AS s FROM events WHERE source_id=$s AND event_kind='reconcile' AND event_id LIKE 'crossing-release:%' AND seq>$prev AND seq<=$obs"
+                                [ "$s", box source; "$prev", box prevHint; "$obs", box newHint ]
+                            |> List.head
+                            |> fun r -> int64Of r "s"
+                        else 0L
+                    let keepReleaseBypass =
+                        releaseBypassSeq > 0L
+                        && (State.Query connection
+                                "SELECT 1 AS x FROM events WHERE source_id=$s AND event_kind='push' AND seq>$rel AND seq<=$obs LIMIT 1"
+                                [ "$s", box source; "$rel", box releaseBypassSeq; "$obs", box newHint ]).IsEmpty
                     if previous.IsNone || desired <> revision then
                         changed.Add source
                         let indexed = match str row "indexed_revision" with null -> None | value -> Some value
                         let dirty = int64Of row "indexed_known" = 0L || indexed <> revision
-                        State.Execute connection "UPDATE sources SET changed_at=$t,first_changed_at=CASE WHEN $dirty THEN COALESCE(first_changed_at,$t) ELSE NULL END WHERE source_id=$s"
-                            [ "$t", box observedAt; "$dirty", box dirty; "$s", box source ]
-                    let hint = State.Query connection "SELECT COALESCE(MAX(seq),0) AS h FROM events WHERE source_id=$s AND created_at<=$t" [ "$s", box source; "$t", box observedAt ] |> List.head
-                    updated <- updated || previous <> Some observedAt || int64Of hint "h" <> int64Of row "observed_hint"
+                        let bypassed = if dirty && keepReleaseBypass then 1 else 0
+                        State.Execute connection "UPDATE sources SET changed_at=$t,first_changed_at=CASE WHEN $dirty THEN COALESCE(first_changed_at,$t) ELSE NULL END,settle_bypassed=$b WHERE source_id=$s"
+                            [ "$t", box observedAt; "$dirty", box dirty; "$b", box bypassed; "$s", box source ]
+                    updated <- updated || previous <> Some observedAt || newHint <> prevHint
                     State.Execute connection "UPDATE sources SET desired_revision=$r,observed_at=$t,observed_hint=$h WHERE source_id=$s"
-                        [ "$r", (match revision with Some r -> box r | None -> null); "$t", box observedAt; "$h", box (int64Of hint "h"); "$s", box source ]
+                        [ "$r", (match revision with Some r -> box r | None -> null); "$t", box observedAt; "$h", box newHint; "$s", box source ]
+                    for fence in activeFences do
+                        if observedAt >= fence.CreatedAt && List.contains source fence.Expected && not (fence.Arrived.Contains source) then
+                            let baseLastHint = Map.tryFind source fence.BaselineLastHints |> Option.defaultValue 0L
+                            let baseObsHint = Map.tryFind source fence.BaselineObservedHints |> Option.defaultValue baseLastHint
+                            let observedPostHoldPush =
+                                not (State.Query connection
+                                         "SELECT 1 AS x FROM events WHERE source_id=$s AND event_kind='push' AND created_at>=$c AND seq>$base AND seq<=$obs LIMIT 1"
+                                         [ "$s", box source; "$c", box fence.CreatedAt; "$base", box baseLastHint; "$obs", box newHint ]).IsEmpty
+                            let changedFromBaselineWithoutPreHoldPending =
+                                revision <> Map.find source fence.Baseline && baseObsHint >= baseLastHint
+                            if observedPostHoldPush || changedFromBaselineWithoutPreHoldPending then
+                                fence.Arrived.Add source |> ignore
+                                fence.Dirty.Value <- true
+                                fenceUpdated <- true
+            if not activeFences.IsEmpty then
+                let sourceHints =
+                    State.Query connection "SELECT source_id,observed_hint,last_hint FROM sources" []
+                    |> List.map (fun r -> str r "source_id", (int64Of r "observed_hint", int64Of r "last_hint"))
+                    |> Map.ofList
+                for fence in activeFences do
+                    let allExpectedArrived =
+                        fence.Expected |> List.forall (fun s ->
+                            let obsHint, lastHint = sourceHints.[s]
+                            fence.Arrived.Contains s && obsHint >= lastHint)
+                    if allExpectedArrived then
+                        let sortedArrived = fence.Arrived |> Seq.sortWith (fun a b -> String.CompareOrdinal(a, b)) |> Seq.toList
+                        State.Execute connection
+                            "UPDATE crossing_fences SET arrived_sources=$arr,released_at=$n,release_reason='all_arrived' WHERE fence_id=$id"
+                            [ "$arr", box (State.StringListJson sortedArrived); "$n", box now; "$id", box fence.FenceId ]
+                        releasedSources.AddRange fence.Expected
+                        fenceReleased <- true
+                    elif fence.Dirty.Value then
+                        let sortedArrived = fence.Arrived |> Seq.sortWith (fun a b -> String.CompareOrdinal(a, b)) |> Seq.toList
+                        State.Execute connection
+                            "UPDATE crossing_fences SET arrived_sources=$arr WHERE fence_id=$id"
+                            [ "$arr", box (State.StringListJson sortedArrived); "$id", box fence.FenceId ]
+            if fenceReleased then
+                State.ClearSettleForSources(connection, releasedSources)
+                State.PruneReleasedFences connection
             if changed.Count > 0 then State.Execute connection "UPDATE metadata SET value=CAST(value AS INTEGER)+1 WHERE key='desired_epoch'" []
-            if updated then this.RecordReadiness(connection, now)
+            if updated || fenceUpdated || fenceReleased then this.RecordReadiness(connection, now)
             Obj [ "changed", Arr [ for s in changed -> Str s ]; "ignored_older", Arr [ for s in ignored -> Str s ] ])
 
     member this.ActiveGeneration() : Generation option =
@@ -490,7 +897,7 @@ type State(path: string, allowedSources: (string * string list) list, ?leaseSeco
         if isNull reason || reason.Trim() = "" || reason.Length > 1024 then raise (StateError "Invalidation reason must be 1–1024 characters")
         this.Transaction(fun connection now _ ->
             for source in sourceIds do
-                State.Execute connection "UPDATE sources SET indexed_known=0,changed_at=$t,first_changed_at=COALESCE(first_changed_at,$t) WHERE source_id=$s" [ "$s", box source; "$t", box now ]
+                State.Execute connection "UPDATE sources SET indexed_known=0,changed_at=$t,first_changed_at=COALESCE(first_changed_at,$t),settle_bypassed=0 WHERE source_id=$s" [ "$s", box source; "$t", box now ]
                 State.Execute connection "INSERT INTO invalidations(source_id,reason,created_at) VALUES ($s,$r,$t)" [ "$s", box source; "$r", box reason; "$t", box now ]
             State.Execute connection "UPDATE metadata SET value=CAST(value AS INTEGER)+1 WHERE key='desired_epoch'" []
             let plan = this.ComputePlan connection
@@ -502,12 +909,17 @@ type State(path: string, allowedSources: (string * string list) list, ?leaseSeco
         this.Transaction(fun connection now _ ->
             let current = this.ComputePlan connection
             if jsonText (planJ plan) <> jsonText (planJ current) then raise (StateError "Plan is stale or modified; request pending_plan again")
+            if current.Crossing.IsSome then raise (StateError "Crossing fence is held; build cannot start until crossing releases")
             if not current.ObservationRequired.IsEmpty then raise (StateError "Authoritative observations are required before building")
             if current.Targets.IsEmpty then raise (StateError "No pending indexing targets")
             if not (State.Query connection "SELECT 1 AS x FROM builds WHERE status='running'" []).IsEmpty then raise (BuildInProgress "An indexing build already holds the lease")
+            let invWatermark =
+                State.Query connection "SELECT COALESCE(MAX(id),0) AS m FROM invalidations" []
+                |> List.head
+                |> fun r -> int64Of r "m"
             let token = Convert.ToHexString(RandomNumberGenerator.GetBytes 32).ToLowerInvariant()
-            State.Execute connection "INSERT INTO builds(token,plan,status,started_at,lease_until) VALUES ($t,$p,'running',$s,$l)"
-                [ "$t", box token; "$p", box (jsonText (planJ current)); "$s", box now; "$l", box (now + leaseSeconds) ]
+            State.Execute connection "INSERT INTO builds(token,plan,status,started_at,lease_until,invalidation_watermark) VALUES ($t,$p,'running',$s,$l,$w)"
+                [ "$t", box token; "$p", box (jsonText (planJ current)); "$s", box now; "$l", box (now + leaseSeconds); "$w", box invWatermark ]
             token)
 
     member private _.Build(connection: SqliteConnection, token: string) : Row =
@@ -542,7 +954,6 @@ type State(path: string, allowedSources: (string * string list) list, ?leaseSeco
             let plan = str build "plan" |> JsonInput.parse
             let planTargets = JsonInput.property "targets" plan |> State.ParseRevisions
             let planBase = match JsonInput.property "base_generation" plan with JsonValue.Null -> None | value -> Some(JsonInput.int64 value)
-            let planEpoch = JsonInput.property "desired_epoch" plan |> JsonInput.int64
             let planDesired = JsonInput.property "desired_revisions" plan |> State.ParseRevisions
             if indexed <> planTargets then raise (StateError "Indexed revisions must cover exactly every planned target, including tombstones")
             let status = str build "status"
@@ -554,17 +965,27 @@ type State(path: string, allowedSources: (string * string list) list, ?leaseSeco
             elif status <> "running" then Obj [ "published", Bool false; "status", Str status; "retry", Bool true ]
             else
                 let current = this.ComputePlan connection
-                if current.BaseGeneration <> planBase || current.DesiredEpoch <> planEpoch || current.DesiredRevisions <> planDesired || not current.ObservationRequired.IsEmpty then
+                if current.BaseGeneration <> planBase then
                     State.Execute connection "UPDATE builds SET status='superseded',finished_at=$n WHERE token=$t" [ "$n", box now; "$t", box token ]
                     Obj [ "published", Bool false; "status", Str "superseded"; "retry", Bool true ]
                 else
                     match State.Query connection "SELECT revisions FROM generations WHERE snapshot_id=$s" [ "$s", box snapshotId ] with
-                    | existing :: _ when State.ParseRevisions(JsonInput.parse (str existing "revisions")) <> current.DesiredRevisions -> raise (StateError "Snapshot ID already identifies different source revisions")
+                    | existing :: _ when State.ParseRevisions(JsonInput.parse (str existing "revisions")) <> planDesired -> raise (StateError "Snapshot ID already identifies different source revisions")
                     | _ -> ()
+                    let invWatermark = int64Of build "invalidation_watermark"
                     for kv in indexed do
-                        State.Execute connection "UPDATE sources SET indexed_revision=$r,indexed_known=1,changed_at=NULL,first_changed_at=NULL WHERE source_id=$s" [ "$r", (match kv.Value with Some r -> box r | None -> null); "$s", box kv.Key ]
+                        let reinvalidated =
+                            not (State.Query connection "SELECT 1 AS x FROM invalidations WHERE source_id=$s AND id>$w LIMIT 1" [ "$s", box kv.Key; "$w", box invWatermark ]).IsEmpty
+                        if reinvalidated then
+                            State.Execute connection
+                                "UPDATE sources SET indexed_revision=$r,indexed_known=0 WHERE source_id=$s"
+                                [ "$r", (match kv.Value with Some r -> box r | None -> null); "$s", box kv.Key ]
+                        else
+                            State.Execute connection
+                                "UPDATE sources SET indexed_revision=$r,indexed_known=1,changed_at=CASE WHEN desired_revision IS $r THEN NULL ELSE changed_at END,first_changed_at=CASE WHEN desired_revision IS $r THEN NULL ELSE first_changed_at END,settle_bypassed=CASE WHEN desired_revision IS $r THEN 0 ELSE settle_bypassed END WHERE source_id=$s"
+                                [ "$r", (match kv.Value with Some r -> box r | None -> null); "$s", box kv.Key ]
                     State.Execute connection "INSERT INTO generations(snapshot_id,revisions,published_at,build_token,configuration_sha256) VALUES ($i,$r,$p,$t,$c)"
-                        [ "$i", box snapshotId; "$r", box (jsonText (revisionsJ current.DesiredRevisions)); "$p", box now; "$t", box token
+                        [ "$i", box snapshotId; "$r", box (jsonText (revisionsJ planDesired)); "$p", box now; "$t", box token
                           "$c", (match configurationSha256 with Some identity -> box identity | None -> null) ]
                     let generation = State.LastRowId connection
                     State.Execute connection "UPDATE builds SET status='completed',snapshot_id=$i,finished_at=$n WHERE token=$t" [ "$i", box snapshotId; "$n", box now; "$t", box token ]
@@ -625,7 +1046,7 @@ type State(path: string, allowedSources: (string * string list) list, ?leaseSeco
                     assess now maximumAge generation.SnapshotId active active false (this.ObservationFacts(connection, plan))
                 | None ->
                     { Freshness = Obj [ "fresh", Bool false; "reasons", Arr [ Str "no_published_generation" ] ]
-                      Active = None; ChangedAt = None; Deadline = None; CheckedAt = now }
+                      Active = None; ChangedAt = None; Deadline = None; CheckedAt = now; Crossing = None }
             // None is a brand-new read; Some cursor (including Some 0L, held after an
             // unpublished sample) is an established cursor whose pruned successors truncate.
             let history =
@@ -639,7 +1060,7 @@ type State(path: string, allowedSources: (string * string list) list, ?leaseSeco
                             match observation.Freshness with
                             | Obj pairs -> Obj (pairs |> List.filter (fun (key, _) -> key <> "checked_at"))
                             | other -> other
-                        observation.Active, observation.ChangedAt, freshness
+                        observation.Active, observation.ChangedAt, observation.Crossing, freshness
                     let currentReadiness = readiness current
                     State.Query connection
                         "SELECT g.*, t.seq, t.committed_at, t.facts FROM readiness_transitions t JOIN generations g USING (generation) WHERE t.seq>$after AND t.seq<=$sequence ORDER BY t.seq"
