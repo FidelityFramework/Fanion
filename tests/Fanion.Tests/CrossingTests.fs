@@ -134,7 +134,7 @@ let private idOfPath (server: Server) (snapshot: string) (relative: string) =
     |> List.pick (fun row -> if text (field row "path") = relative && text (field row "kind") = "file" then Some(text (field row "id")) else None)
 
 [<Fact>]
-let ``trunk branch invariant enforces main and master only and crossing endpoints fail closed`` () = task {
+let ``corpus branch refs accept canonical configured branches and crossing endpoints fail closed on mismatch`` () = task {
     let temp = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "../../.scratch/tests", "trunk-cfg-" + Guid.NewGuid().ToString("N")))
     Directory.CreateDirectory temp |> ignore
     try
@@ -142,12 +142,15 @@ let ``trunk branch invariant enforces main and master only and crossing endpoint
             let p = Path.Combine(temp, name)
             File.WriteAllText(p, sprintf """{"schema_version":1,"sources":[{"id":"a","repo":"FidelityFramework/A","ref":"%s","depends_on":[]},{"id":"b","repo":"FidelityFramework/B","ref":"%s","depends_on":[]}]}""" refA refB)
             p
-        // Positive: both refs/heads/main and refs/heads/master are admitted.
+        // Positive: canonical explicit refs (including production corpus.framework.json) are admitted.
         let valid, _ = Coordinator.configSources (writeCfg "valid.json" "refs/heads/main" "refs/heads/master")
         Assert.Equal("refs/heads/main", valid.[0].Ref)
         Assert.Equal("refs/heads/master", valid.[1].Ref)
-        // Negative: any non-trunk or wrong-case ref is refused.
-        for badRef in [ "refs/heads/release"; "refs/heads/feature/x"; "refs/heads/MAIN"; "refs/heads/MASTER"; "refs/tags/v1"; "main" ] do
+        let prodCorpus = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "../../config/corpus.framework.json"))
+        let prodSources, _ = Coordinator.configSources prodCorpus
+        Assert.True(prodSources.Length >= 24, "production corpus.framework.json must validate cleanly")
+        // Negative: malformed, tag, traversal, trailing-slash, or non-canonical refs are refused.
+        for badRef in [ "refs/tags/v1"; "main"; "refs/heads/../main"; "refs/heads/main/"; "refs/heads//main"; "refs/heads/-bad" ] do
             Assert.Throws<ArgumentException>(fun () -> Coordinator.configSources (writeCfg ("bad-" + Guid.NewGuid().ToString("N") + ".json") badRef "refs/heads/main") |> ignore) |> ignore
     finally
         try Directory.Delete(temp, true) with _ -> ()

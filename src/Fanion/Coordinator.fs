@@ -43,7 +43,7 @@ type Source =
 
 let private idPattern = Regex(@"\A[a-z][a-z0-9_\-]{0,47}\z", RegexOptions.Compiled)
 let private repoPattern = Regex(@"\AFidelityFramework/[A-Za-z0-9_.\-]{1,80}\z", RegexOptions.Compiled)
-let private refPattern = Regex(@"\Arefs/heads/(?:main|master)\z", RegexOptions.Compiled)
+let private refPattern = Regex(@"\Arefs/heads/[A-Za-z0-9][A-Za-z0-9_./\-]{0,100}\z", RegexOptions.Compiled)
 let private revisionPattern = Regex(@"\A[0-9a-f]{40}\z", RegexOptions.Compiled)
 
 /// config_sources: validated, ordered as configured.
@@ -69,7 +69,7 @@ let configSources (configPath: string) : Source list * JsonValue =
             let repo = JsonInput.property "repo" source |> JsonInput.string
             if isNull repo || not (repoPattern.IsMatch repo) then raise (ArgumentException "Only explicit FidelityFramework repositories are accepted")
             let reference = JsonInput.property "ref" source |> JsonInput.string
-            if isNull reference || not (refPattern.IsMatch reference) || reference.Contains ".." || reference.EndsWith("/", StringComparison.Ordinal) then raise (ArgumentException "A canonical explicit branch ref is required")
+            if isNull reference || not (refPattern.IsMatch reference) || reference.Contains ".." || reference.Contains "//" || reference.EndsWith("/", StringComparison.Ordinal) then raise (ArgumentException "A canonical explicit branch ref is required")
             let policy =
                 match Json.prop "policy" source with
                 | Some JsonValue.Null -> raise (ArgumentException "Repository policy must be an object")

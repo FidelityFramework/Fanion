@@ -398,8 +398,7 @@ let runWithChangesAsync (createChanges: string -> IndexState.Changes) (configure
                                             | Some configured ->
                                                 if not (requested.Contains sourceId) then
                                                     raise (QueryError "refs entries must match requested sources")
-                                                let isTrunk = reference = "refs/heads/main" || reference = "refs/heads/master"
-                                                if not isTrunk || reference <> configured.Ref then
+                                                if reference <> configured.Ref then
                                                     refError <- Some(422, Obj [ "error", Str "invalid_crossing_ref"; "source", Str sourceId; "ref", Str reference ])
                                 | Some _ -> raise (QueryError "refs must be an object")
                                 match refError with
