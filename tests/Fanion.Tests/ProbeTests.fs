@@ -92,6 +92,11 @@ let ``native priming exercises discovery and qualified generation with bounded t
         Assert.Equal(Some(Str "ask"), value "action" request)
         Assert.Equal(Some(Str snapshot), value "snapshot_id" request)
         Assert.Equal(Some(Int 3000L), value "max_chars" request)
+    match value "text" handler.Requests.[2] with
+    | Some(Str text) ->
+        Assert.Contains("FidelityFramework/clef-lang-site", text)
+        Assert.Equal<string list>([ "hugo/content/blog/retrieving-fidelity.md" ], English.explicitPaths text)
+    | other -> failwithf "Expected qualified priming text, got %A" other
 
 [<Fact>]
 let ``priming refuses a skipped discovery stage and a rejected model without hiding either in retries`` () =

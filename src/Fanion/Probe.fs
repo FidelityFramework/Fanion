@@ -102,7 +102,7 @@ let primeWith (client: HttpClient) (baseUrl: string) (token: string) (model: str
     use deadline = new Threading.CancellationTokenSource(timeout)
     let request = request client baseUrl token deadline.Token
     let questions = [ "What relates to portable-mlir-emission in FidelityFramework/Alex?", 2
-                      "List outgoing links from docs/PSG_Nanopass_Architecture.md in FidelityFramework/Composer.", 1 ]
+                      "List outgoing links from hugo/content/blog/retrieving-fidelity.md in FidelityFramework/clef-lang-site.", 1 ]
     let mutable completed = false
     while not completed do
         try
